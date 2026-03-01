@@ -176,16 +176,9 @@ impl TelephonyAgent {
             let mut silence_duration = Duration::ZERO;
             let mut last_speech = Instant::now();
             
-            // Connect to Voxtral ASR WebSocket
-            let (mut ws_stream, _) = match tokio_tungstenite::connect_async(&config.asr_ws_url).await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    error!("Failed to connect to ASR: {}", e);
-                    return;
-                }
-            };
-            
-            info!("Connected to Voxtral ASR at {}", config.asr_ws_url);
+            // Use HTTP-based ASR instead of WebSocket
+            let asr_http_url = config.asr_ws_url.replace("ws://", "http://").replace("/v1/realtime", "/v1/audio/transcriptions");
+            info!("Using HTTP ASR at {}", asr_http_url);
             
             while let Some(audio_bytes) = rx.recv().await {
                 // Convert bytes to f32 PCM
