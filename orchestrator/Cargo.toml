@@ -9,28 +9,15 @@ repository = "https://github.com/native-logic-technologies/flow"
 
 [dependencies]
 # Async runtime - optimized for high concurrency
-tokio = { version = "1.36", features = ["full", "parking_lot"] }
+tokio = { version = "1.36", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
-# LiveKit SDK for WebRTC/SIP integration
-livekit = "0.3"
-livekit-api = "0.3"
-livekit-protocol = "0.3"
-
 # WebSocket for Voxtral ASR realtime API
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
-# HTTP client for LLM and TTS APIs
+# HTTP client for LLM and TTS APIs - using rustls
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
-
-# ONNX Runtime for Silero VAD (Zero Python)
-ort = { version = "2.0", features = ["ndarray"] }
-ndarray = "0.15"
-
-# Audio processing
-rubato = "0.14"      # Fast audio resampling
-byteorder = "1.5"    # PCM byte manipulation
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -41,26 +28,10 @@ bytes = "1.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-thiserror = "1.0"
-
-# Concurrency primitives
-crossbeam = "0.8"
-crossbeam-channel = "0.5"
-parking_lot = "0.12"
-tokio-cancellation-token = "0.1"
+base64 = "0.22"
 
 # Configuration
-config = "0.14"
 dotenvy = "0.15"
-
-# Metrics (optional, for monitoring)
-opentelemetry = { version = "0.22", optional = true }
-opentelemetry-prometheus = { version = "0.15", optional = true }
-prometheus = { version = "0.13", optional = true }
-
-[features]
-default = ["metrics"]
-metrics = ["opentelemetry", "opentelemetry-prometheus", "prometheus"]
 
 [profile.release]
 opt-level = 3

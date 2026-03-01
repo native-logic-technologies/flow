@@ -92,7 +92,7 @@ fn load_config() -> anyhow::Result<AgentConfig> {
 }
 
 /// Validate backend services are accessible
-async fn validate_services(config: &AgentConfig) -> anyhow::Result<()> {
+async fn validate_services(_config: &AgentConfig) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
@@ -145,7 +145,7 @@ async fn start_livekit_server(config: AgentConfig) -> anyhow::Result<()> {
     
     // Create channels for audio flow
     // ingress: LiveKit -> Agent (caller's voice)
-    let (ingress_tx, ingress_rx) = mpsc::channel::<bytes::Bytes>(1000);
+    let (_ingress_tx, ingress_rx) = mpsc::channel::<bytes::Bytes>(1000);
     
     // egress: Agent -> LiveKit (bot's voice)
     let (egress_tx, mut egress_rx) = mpsc::channel::<bytes::Bytes>(1000);

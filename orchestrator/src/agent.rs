@@ -11,7 +11,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{timeout, Duration, Instant};
-use tokio_cancellation_token::CancellationToken;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 /// Audio processing constants
@@ -113,7 +113,7 @@ impl TelephonyAgent {
         info!("Starting call handling");
         
         // Spawn ingress task (listening)
-        let ingress_handle = self.spawn_ingress_task(ingress_rx.resubscribe());
+        let ingress_handle = self.spawn_ingress_task(ingress_rx);
         
         // Spawn egress task (speaking)
         let egress_handle = self.spawn_egress_task(egress_tx);
@@ -195,7 +195,8 @@ impl TelephonyAgent {
                         // Stream to ASR
                         let audio_msg = json!({
                             "type": "audio",
-                            "data": base64::encode(&chunk.iter()
+                            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, 
+                                &chunk.iter()
                                 .map(|s| (s * 32767.0) as i16)
                                 .flat_map(|s| s.to_le_bytes())
                                 .collect::<Vec<_>>())
