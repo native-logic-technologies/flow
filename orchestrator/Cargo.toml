@@ -3,23 +3,28 @@ name = "telephony-orchestrator"
 version = "0.1.0"
 edition = "2021"
 authors = ["Native Logic Technologies <dev@native-logic-technologies.com>"]
-description = "High-performance LiveKit Telephony Orchestrator for DGX Spark"
+description = "High-performance Telephony Orchestrator for DGX Spark"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/native-logic-technologies/flow"
 
 [dependencies]
-# Async runtime - optimized for high concurrency
+# Async runtime
 tokio = { version = "1.36", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
-# WebSocket for Voxtral ASR realtime API
+# WebSocket for client connections and ASR
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 
 # HTTP client for LLM and TTS APIs
 reqwest = { version = "0.12", features = ["stream", "json"] }
 
-# ONNX Runtime for Silero VAD (Zero Python)
+# Web server for health checks and metrics
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# ONNX Runtime for Silero VAD
 ort = "2.0.0-rc.2"
 
 # Serialization
@@ -38,6 +43,9 @@ deep_filter = "0.2.5"
 
 # Configuration
 dotenvy = "0.15"
+
+# Audio processing
+rubato = "0.14"  # Sample rate conversion
 
 [profile.release]
 opt-level = 3
