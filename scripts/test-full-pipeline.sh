@@ -38,7 +38,7 @@ echo ""
 # Test 1: Direct LLM
 echo "Test 1: Direct LLM Query"
 echo "─────────────────────────────────────────────────────────────────────"
-curl -s -X POST http://localhost:8000/v1/chat/completions \
+LLM_RESPONSE=$(curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "nvidia/Nemotron-3-Nano-30B",
@@ -48,7 +48,10 @@ curl -s -X POST http://localhost:8000/v1/chat/completions \
     ],
     "max_tokens": 50,
     "temperature": 0.3
-  }' | jq -r '.choices[0].message.content' 2>/dev/null || echo "Error: LLM test failed"
+  }' 2>/dev/null)
+
+# Try to extract content, show raw response if jq fails
+echo "$LLM_RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null || echo "Raw response: $LLM_RESPONSE"
 echo ""
 echo ""
 
@@ -80,26 +83,39 @@ VOICE_FILE="$HOME/telephony-stack/tts/phil-conversational-16k-5s.wav"
 if [ -f "$VOICE_FILE" ]; then
     echo "Reference audio found: $(ls -lh $VOICE_FILE | awk '{print $5}')"
     
-    # Encode to base64
-    REF_AUDIO_B64=$(base64 -w 0 "$VOICE_FILE")
+    # Encode to base64 and save to temp file (avoids "argument list too long")
+    echo "Encoding reference audio..."
+    base64 -w 0 "$VOICE_FILE" > /tmp/ref_audio.b64
+    
+    # Create JSON payload file
+    echo "Creating request payload..."
+    cat > /tmp/tts_request.json << 'JSONEOF'
+{
+  "model": "OpenMOSS-Team/MOSS-TTS-Realtime",
+  "input": "Hi, this is Phil speaking with my cloned voice.",
+  "response_format": "pcm",
+  "extra_body": {
+    "reference_audio": "
+JSONEOF
+    cat /tmp/ref_audio.b64 >> /tmp/tts_request.json
+    echo '"' >> /tmp/tts_request.json
+    echo '  }' >> /tmp/tts_request.json
+    echo '}' >> /tmp/tts_request.json
     
     echo "Sending request with voice cloning..."
     curl -s -X POST http://localhost:8002/v1/audio/speech \
       -H "Content-Type: application/json" \
-      -d "{
-        \"model\": \"OpenMOSS-Team/MOSS-TTS-Realtime\",
-        \"input\": \"Hi, this is Phil speaking with my cloned voice.\",
-        \"response_format\": \"pcm\",
-        \"extra_body\": {
-          \"reference_audio\": \"$REF_AUDIO_B64\"
-        }
-      }" -o /tmp/test_cloned_voice.pcm
+      -d @/tmp/tts_request.json \
+      -o /tmp/test_cloned_voice.pcm
+    
+    # Cleanup temp files
+    rm -f /tmp/ref_audio.b64 /tmp/tts_request.json
     
     if [ -f /tmp/test_cloned_voice.pcm ] && [ -s /tmp/test_cloned_voice.pcm ]; then
         echo "✓ Cloned voice TTS generated: $(ls -lh /tmp/test_cloned_voice.pcm | awk '{print $5}')"
         echo "  To play: play -r 24000 -e signed -b 16 -c 1 /tmp/test_cloned_voice.pcm"
     else
-        echo "✗ Cloned voice TTS failed"
+        echo "✗ Cloned voice TTS failed - check /tmp/test_cloned_voice.pcm"
     fi
 else
     echo "No reference audio found at $VOICE_FILE"
