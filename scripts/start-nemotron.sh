@@ -38,5 +38,4 @@ python -m vllm.entrypoints.openai.api_server \
     --enforce-eager \
     --trust-remote-code \
     --port 8000 \
-    --no-enable-reasoning \
     --chat-template ~/telephony-stack/telephony_template.jinja
