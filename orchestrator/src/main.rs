@@ -183,6 +183,37 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         Some("interrupt") => {
                             info!("Client requested interrupt");
                         }
+                        Some("text") => {
+                            // Text message from client (text mode)
+                            if let Some(msg_text) = control.get("text").and_then(|t| t.as_str()) {
+                                info!("Received text message: {}", msg_text);
+                                
+                                // Add to conversation
+                                agent.conversation.write().await.push(serde_json::json!({
+                                    "role": "user",
+                                    "content": msg_text
+                                }));
+                                
+                                // Trigger LLM + TTS pipeline
+                                let tts_cancel = Arc::clone(&agent.tts_cancel);
+                                let conversation = Arc::clone(&agent.conversation);
+                                let config = agent.config.clone();
+                                let http_client = agent.http_client.clone();
+                                let state = Arc::clone(&agent.state);
+                                
+                                tokio::spawn(async move {
+                                    if let Err(e) = agent::process_llm_tts(
+                                        &config,
+                                        &http_client,
+                                        &conversation,
+                                        &state,
+                                        &tts_cancel,
+                                    ).await {
+                                        error!("LLM/TTS processing failed: {}", e);
+                                    }
+                                });
+                            }
+                        }
                         _ => {}
                     }
                 }

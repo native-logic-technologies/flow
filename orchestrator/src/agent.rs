@@ -91,17 +91,17 @@ Remember: This is a voice conversation. Be warm, conversational, and human."#.to
 
 /// Per-call state and resources
 pub struct TelephonyAgent {
-    config: AgentConfig,
+    pub config: AgentConfig,
     /// HTTP client for LLM/TTS
-    http_client: Client,
+    pub http_client: Client,
     /// VAD instance (per-call for state isolation)
     vad: Arc<Mutex<SileroVad>>,
     /// Current call state
-    state: Arc<RwLock<CallState>>,
+    pub state: Arc<RwLock<CallState>>,
     /// Cancellation token for barge-in
-    tts_cancel: Arc<Mutex<CancellationToken>>,
+    pub tts_cancel: Arc<Mutex<CancellationToken>>,
     /// Conversation history for LLM context
-    conversation: Arc<RwLock<Vec<serde_json::Value>>>,
+    pub conversation: Arc<RwLock<Vec<serde_json::Value>>>,
     /// Call start time
     start_time: Instant,
 }
@@ -318,7 +318,7 @@ impl TelephonyAgent {
 
 /// Process LLM -> TTS pipeline
 #[instrument(skip(config, http_client, conversation, state, cancel_token))]
-async fn process_llm_tts(
+pub async fn process_llm_tts(
     config: &AgentConfig,
     http_client: &Client,
     conversation: &Arc<RwLock<Vec<serde_json::Value>>>,

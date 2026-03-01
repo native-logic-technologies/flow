@@ -26,7 +26,7 @@
             border-radius: 20px;
             padding: 40px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 500px;
+            max-width: 600px;
             width: 90%;
         }
         
@@ -39,8 +39,37 @@
         .subtitle {
             text-align: center;
             color: #666;
-            margin-bottom: 30px;
+            margin-bottom: 20px;
             font-size: 14px;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            background: #f0f0f0;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        
+        .tab.active {
+            background: #667eea;
+            color: white;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
         }
         
         .status {
@@ -112,6 +141,46 @@
             background: #c0392b;
         }
         
+        .text-input-area {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .text-input-area input {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 50px;
+            font-size: 16px;
+            outline: none;
+        }
+        
+        .text-input-area input:focus {
+            border-color: #667eea;
+        }
+        
+        .text-input-area button {
+            padding: 15px 25px;
+            white-space: nowrap;
+        }
+        
+        .visualizer {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 60px;
+            margin-bottom: 20px;
+            gap: 3px;
+        }
+        
+        .bar {
+            width: 4px;
+            background: #667eea;
+            border-radius: 2px;
+            transition: height 0.1s;
+        }
+        
         .transcript {
             background: #f8f9fa;
             border-radius: 10px;
@@ -159,22 +228,6 @@
             margin-bottom: 5px;
         }
         
-        .visualizer {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 60px;
-            margin-bottom: 20px;
-            gap: 3px;
-        }
-        
-        .bar {
-            width: 4px;
-            background: #667eea;
-            border-radius: 2px;
-            transition: height 0.1s;
-        }
-        
         .info {
             text-align: center;
             font-size: 12px;
@@ -190,6 +243,26 @@
             font-size: 12px;
             margin-top: 10px;
         }
+        
+        .mode-indicator {
+            text-align: center;
+            padding: 8px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .debug-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
@@ -197,15 +270,41 @@
         <h1>🎙️ CleanS2S Voice AI</h1>
         <p class="subtitle">Real-time speech-to-speech on DGX Spark</p>
         
-        <div id="status" class="status disconnected">Disconnected</div>
-        
-        <div class="visualizer" id="visualizer">
-            <!-- Audio visualizer bars will be added here -->
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('voice')">🎤 Voice</button>
+            <button class="tab" onclick="switchTab('text')">⌨️ Text</button>
         </div>
         
-        <div class="controls">
-            <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
-            <button id="disconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <!-- Voice Mode -->
+        <div id="voice-tab" class="tab-content active">
+            <div class="mode-indicator">Speak naturally, pause when done</div>
+            
+            <div class="visualizer" id="visualizer">
+                <!-- Audio visualizer bars -->
+            </div>
+            
+            <div class="controls">
+                <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
+                <button id="disconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+        </div>
+        
+        <!-- Text Mode -->
+        <div id="text-tab" class="tab-content">
+            <div class="mode-indicator">Type your message, AI responds in voice</div>
+            
+            <div class="text-input-area">
+                <input type="text" id="textInput" placeholder="Type your message..." 
+                       onkeypress="if(event.key==='Enter')sendText()">
+                <button class="btn-primary" onclick="sendText()">Send</button>
+            </div>
+            
+            <div class="controls">
+                <button id="textConnectBtn" class="btn-primary" onclick="connectText()">Connect</button>
+                <button id="textDisconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
         </div>
         
         <div class="transcript">
@@ -222,18 +321,17 @@
     <script>
         // Configuration
         const WS_URL = 'wss://cleans2s.voiceflow.cloud/ws';
-        const AUDIO_CONTEXT_SAMPLE_RATE = 8000;  // Input: 8kHz for VAD
-        const OUTPUT_SAMPLE_RATE = 24000;         // Output: 24kHz from TTS
+        const AUDIO_CONTEXT_SAMPLE_RATE = 8000;
+        const OUTPUT_SAMPLE_RATE = 24000;
         
         let ws = null;
         let audioContext = null;
         let mediaStream = null;
         let processor = null;
         let isConnected = false;
-        let audioQueue = [];
-        let isPlaying = false;
+        let currentMode = 'voice';
         
-        // Visualizer
+        // Visualizer setup
         const visualizer = document.getElementById('visualizer');
         const bars = [];
         for (let i = 0; i < 30; i++) {
@@ -242,6 +340,15 @@
             bar.style.height = '5px';
             visualizer.appendChild(bar);
             bars.push(bar);
+        }
+        
+        function switchTab(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(mode + '-tab').classList.add('active');
         }
         
         function updateStatus(status, text) {
@@ -259,51 +366,30 @@
             messages.scrollTop = messages.scrollHeight;
         }
         
-        async function connect() {
+        // Text mode connection
+        async function connectText() {
             updateStatus('connecting', 'Connecting...');
-            document.getElementById('connectBtn').disabled = true;
+            document.getElementById('textConnectBtn').disabled = true;
             
             try {
-                // Get microphone access
-                mediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: AUDIO_CONTEXT_SAMPLE_RATE,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true
-                    }
-                });
-                
-                // Create audio context
-                audioContext = new AudioContext({
-                    sampleRate: AUDIO_CONTEXT_SAMPLE_RATE
-                });
-                
-                // Connect WebSocket with retry logic
                 ws = new WebSocket(WS_URL);
                 ws.binaryType = 'arraybuffer';
                 
-                ws.onerror = (err) => {
-                    console.error('WebSocket error:', err);
-                    updateStatus('disconnected', 'Connection error - check console');
-                };
-                
                 ws.onopen = () => {
                     isConnected = true;
-                    updateStatus('connected', 'Connected - Speak now!');
-                    document.getElementById('disconnectBtn').disabled = false;
-                    document.getElementById('latency').textContent = 'Listening...';
+                    updateStatus('connected', 'Connected - Type a message!');
+                    document.getElementById('textDisconnectBtn').disabled = false;
+                    document.getElementById('textInput').focus();
                     
-                    // Start audio processing
-                    startAudioProcessing();
+                    // Send a test ping
+                    ws.send(JSON.stringify({type: "ping"}));
                 };
                 
                 ws.onmessage = (event) => {
                     if (event.data instanceof ArrayBuffer) {
-                        // Received audio from server - play it
+                        // Received audio - play it
                         playAudio(event.data);
                     } else {
-                        // Text message (for debugging)
                         console.log('Server:', event.data);
                     }
                 };
@@ -315,9 +401,87 @@
                 };
                 
                 ws.onclose = () => {
-                    if (isConnected) {
-                        disconnect();
+                    if (isConnected) disconnect();
+                };
+                
+            } catch (err) {
+                console.error('Connection failed:', err);
+                updateStatus('disconnected', 'Failed: ' + err.message);
+                document.getElementById('textConnectBtn').disabled = false;
+            }
+        }
+        
+        // Send text message
+        async function sendText() {
+            if (!isConnected || !ws) {
+                alert('Please connect first!');
+                return;
+            }
+            
+            const input = document.getElementById('textInput');
+            const text = input.value.trim();
+            
+            if (!text) return;
+            
+            // Add to conversation
+            addMessage('user', text);
+            input.value = '';
+            
+            updateStatus('thinking', 'AI is thinking...');
+            
+            // Send as a special text message
+            // The orchestrator needs to handle this
+            ws.send(JSON.stringify({
+                type: 'text',
+                text: text
+            }));
+        }
+        
+        // Voice mode connection
+        async function connect() {
+            updateStatus('connecting', 'Connecting...');
+            document.getElementById('connectBtn').disabled = true;
+            
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: AUDIO_CONTEXT_SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
                     }
+                });
+                
+                audioContext = new AudioContext({
+                    sampleRate: AUDIO_CONTEXT_SAMPLE_RATE
+                });
+                
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                
+                ws.onopen = () => {
+                    isConnected = true;
+                    updateStatus('connected', 'Connected - Speak now!');
+                    document.getElementById('disconnectBtn').disabled = false;
+                    startAudioProcessing();
+                };
+                
+                ws.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        playAudio(event.data);
+                    } else {
+                        console.log('Server:', event.data);
+                    }
+                };
+                
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    updateStatus('disconnected', 'Connection error');
+                    disconnect();
+                };
+                
+                ws.onclose = () => {
+                    if (isConnected) disconnect();
                 };
                 
             } catch (err) {
@@ -370,11 +534,9 @@
                 float32Data[i] = int16Data[i] / 32768;
             }
             
-            // Create audio buffer
             const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
             audioBuffer.copyToChannel(float32Data, 0);
             
-            // Play
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(audioContext.destination);
@@ -384,7 +546,7 @@
             
             source.onended = () => {
                 if (isConnected) {
-                    updateStatus('connected', 'Connected - Speak now!');
+                    updateStatus('connected', currentMode === 'voice' ? 'Connected - Speak now!' : 'Connected - Type a message!');
                 }
             };
         }
@@ -415,9 +577,8 @@
             updateStatus('disconnected', 'Disconnected');
             document.getElementById('connectBtn').disabled = false;
             document.getElementById('disconnectBtn').disabled = true;
-            document.getElementById('latency').textContent = 'Click Connect to start';
-            
-            // Clear visualizer
+            document.getElementById('textConnectBtn').disabled = false;
+            document.getElementById('textDisconnectBtn').disabled = true;
             bars.forEach(bar => bar.style.height = '5px');
         }
     </script>
