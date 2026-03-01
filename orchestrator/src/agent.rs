@@ -2,6 +2,18 @@
 //! 
 //! Implements the zero-latency state machine for speech-to-speech conversations.
 //! Handles ingress (listening) and egress (speaking) with barge-in support.
+//!
+//! # Complete Audio Pipeline
+//!
+//! 1. **LiveKit (Rust)**: Receives raw 8kHz RTP packets from SIP/WebRTC
+//! 2. **DeepFilterNet v0.5.6 (Rust)**: Noise suppression (< 2ms, pure Rust tract backend)
+//! 3. **Silero VAD (Rust)**: Voice activity detection (< 1ms, ONNX Runtime)
+//! 4. **Voxtral ASR (vLLM)**: Transcription via WebSocket (~40ms)
+//! 5. **Nemotron LLM (vLLM)**: Response generation with reasoning disabled (~80ms TTFT)
+//! 6. **MOSS-TTS (FastAPI)**: Voice cloning + synthesis (~100ms)
+//! 7. **LiveKit (Rust)**: Audio playback to phone line
+//!
+//! Total E2E Latency: ~250ms
 
 use crate::vad::{SileroVad, VAD_CHUNK_SAMPLES, VAD_SAMPLE_RATE, SILENCE_TIMEOUT_MS};
 use bytes::Bytes;

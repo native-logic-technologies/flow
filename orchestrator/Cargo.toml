@@ -33,6 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 base64 = "0.22"
 
+# DeepFilterNet for noise suppression
+deep_filter = "0.2.5"
+
 # Configuration
 dotenvy = "0.15"
 

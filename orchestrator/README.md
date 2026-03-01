@@ -6,52 +6,42 @@ High-performance Rust orchestrator for real-time speech-to-speech AI conversatio
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Flow Orchestrator (Rust)                             │
+│                     Complete Audio Pipeline (E2E ~250ms)                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐          │
-│  │ Silero VAD       │  │ Ingress Loop     │  │ Egress Loop      │          │
-│  │ (ONNX, CPU)      │  │ (Listening)      │  │ (Speaking)       │          │
-│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘          │
-│           │                     │                     │                     │
-│           ▼                     ▼                     ▼                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐  │
-│  │                        State Machine                                 │  │
-│  │  Listening → Processing → Thinking → Speaking → Listening           │  │
-│  │                           ↑                │                        │  │
-│  │                           └──── Barge-In ──┘                        │  │
-│  └─────────────────────────────────────────────────────────────────────┘  │
+│  1. LiveKit (Rust)    2. DeepFilterNet     3. Silero VAD                    │
+│     Receive 8kHz         Noise Suppression   Voice Detection                 │
+│     RTP packets          (< 2ms)             (< 1ms)                         │
+│           │                    │                   │                         │
+│           └────────────────────┴───────────────────┘                         │
+│                              │                                               │
+│                              ▼                                               │
+│  4. Voxtral ASR (vLLM)   5. Nemotron LLM   6. MOSS-TTS                      │
+│     WebSocket              NVFP4 Blackwell   Voice Cloning                   │
+│     Port 8001              Port 8000         Port 8002                       │
+│     (~40ms)                (~80ms TTFT)      (~100ms)                       │
+│                              │                                               │
+│                              ▼                                               │
+│                    7. LiveKit (Rust)                                         │
+│                       Audio Playback                                         │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        ▼                           ▼                           ▼
-┌───────────────┐         ┌───────────────┐         ┌───────────────┐
-│  Voxtral ASR  │         │ Nemotron LLM  │         │  MOSS-TTS     │
-│  Port 8001    │         │  Port 8000    │         │  Port 8002    │
-│  (WebSocket)  │         │   (HTTP/SSE)  │         │  (HTTP/PCM)   │
-└───────────────┘         └───────────────┘         └───────────────┘
 ```
 
 ## Features
 
-- **Zero-Latency VAD**: Silero v6.2.1 (ONNX) runs on CPU in microseconds
-- **Barge-In Support**: Immediate interruption handling with cancellation tokens
+- **Noise Suppression**: DeepFilterNet v0.5.6 with tract backend (pure Rust)
+- **Voice Activity**: Silero VAD v6.2.1 (ONNX, CPU-only)
+- **Barge-In Support**: Immediate interruption handling
 - **Streaming Architecture**: Token-by-token LLM → sentence-by-sentence TTS
-- **High Concurrency**: Tokio runtime optimized for 300+ concurrent calls
-- **Memory Efficient**: GPU VRAM reserved for LLM/ASR, VAD on CPU
+- **Zero-Shot Voice Cloning**: 16kHz mono reference audio
+- **High Concurrency**: Tokio runtime for 300+ concurrent calls
 
-## Prerequisites
+## Dependencies
 
 1. **Rust** (latest stable): https://rustup.rs/
-2. **ONNX Runtime**: `ort` crate handles this automatically
-3. **Silero VAD Model**:
-   ```bash
-   mkdir -p models
-   wget https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx -O models/silero_vad.onnx
-   ```
-
-4. **Backend Services Running**:
+2. **Silero VAD Model**: Download from [releases](https://github.com/snakers4/silero-vad/releases)
+3. **Backend Services**:
    - Nemotron LLM on port 8000
    - Voxtral ASR on port 8001
    - MOSS-TTS on port 8002
@@ -84,101 +74,129 @@ TTS_URL=http://127.0.0.1:8002/v1/audio/speech
 # VAD Model Path
 VAD_MODEL_PATH=./models/silero_vad.onnx
 
-# Optional: Voice cloning reference
-TTS_VOICE=default
+# Voice Cloning (WAV, Mono, 16kHz, PCM 16-bit, 3-5 seconds)
+TTS_VOICE_FILE=/path/to/reference_voice.wav
 
-# LLM System Prompt
-LLM_SYSTEM_PROMPT="You are a helpful voice assistant for telephone conversations."
+# Logging
+RUST_LOG=info
 ```
+
+## Voice Cloning Audio Format
+
+**Critical**: MOSS-TTS requires exact format:
+
+| Parameter | Required | Notes |
+|-----------|----------|-------|
+| Format | WAV | MP3/M4A causes static |
+| Channels | Mono (1) | Stereo causes tensor crash |
+| Sample Rate | 16000 Hz | 48kHz wastes compute |
+| Duration | 3-5 seconds | <3s: no emotion, >5s: slow |
+| Acoustics | Zero noise | Model clones everything |
+
+**Convert with FFmpeg:**
+```bash
+ffmpeg -i input.mp3 -ac 1 -ar 16000 -c:a pcm_s16le output.wav
+```
+
+## DeepFilterNet Integration
+
+The orchestrator includes DeepFilterNet v0.5.6 with the `tract` feature:
+
+```toml
+[dependencies]
+deep_filter = { version = "0.5.6", features = ["tract"] }
+```
+
+This provides:
+- Pure Rust implementation (no C++ bindings)
+- CPU-only inference (preserves GPU VRAM)
+- SIMD optimizations for ARM64/Blackwell
+- < 2ms latency per frame
 
 ## Running
 
 ```bash
-# Start the orchestrator
-./target/release/telephony-orchestrator
-
-# Or with cargo
-cargo run --release
+# From project root
+./scripts/start-orchestrator.sh
 ```
 
-## Performance Tuning
+## Performance Targets
 
-### DGX Spark Specific Optimizations
+| Component | Latency | Notes |
+|-----------|---------|-------|
+| DeepFilterNet | < 2ms | Noise suppression |
+| Silero VAD | < 1ms | Speech detection |
+| Voxtral ASR | ~40ms | Transcription |
+| Nemotron LLM | ~80ms | Time to first token |
+| MOSS-TTS | ~100ms | Voice synthesis |
+| **Total E2E** | **~250ms** | User speaks → hears response |
 
-1. **CPU Affinity**: Reserve cores for vLLM (Python GIL)
-   ```rust
-   // In main.rs
-   #[tokio::main(worker_threads = 16)]
-   ```
-
-2. **Network Tuning**: Enable kernel bypass for WebRTC
-   ```bash
-   sudo ethtool -G eth0 rx 4096 tx 4096
-   sudo sysctl -w net.core.rmem_max=134217728
-   sudo sysctl -w net.core.wmem_max=134217728
-   ```
-
-3. **Lock-Free Buffers**: Using `crossbeam` for audio queue
-
-## API Integration
-
-### Voxtral ASR (WebSocket)
-
-```json
-{"type": "audio", "data": "<base64_pcm>"}
-{"type": "commit"}  // After 600ms silence
-```
-
-### Nemotron LLM (SSE)
-
-```http
-POST /v1/chat/completions
-Content-Type: application/json
-
-{
-  "model": "nvidia/Nemotron-3-Nano-30B",
-  "messages": [...],
-  "stream": true
-}
-```
-
-### MOSS-TTS (Streaming)
-
-```http
-POST /v1/audio/speech
-Content-Type: application/json
-
-{
-  "model": "OpenMOSS-Team/MOSS-TTS-Realtime",
-  "input": "Hello world",
-  "response_format": "pcm"
-}
-```
-
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
 orchestrator/
-├── Cargo.toml              # Dependencies
+├── Cargo.toml              # Dependencies (DeepFilterNet v0.5.6, etc.)
+├── .env.example            # Configuration template
 ├── src/
-│   ├── main.rs            # Entry point
-│   ├── vad.rs             # Silero VAD wrapper
-│   └── agent.rs           # Telephony agent state machine
-├── models/                # ONNX models (gitignored)
-└── README.md
+│   ├── main.rs            # Entry point, Tokio runtime
+│   ├── agent.rs           # Telephony state machine
+│   ├── audio_pipeline.rs  # DeepFilterNet + VAD integration
+│   └── vad.rs             # Silero VAD wrapper
+└── models/                # ONNX models (gitignored)
+    └── silero_vad.onnx    # Download from GitHub releases
 ```
 
-### Testing
+## Audio Frame Sizes
+
+Different models require different frame sizes:
+
+| Model | Frame Size | At 8kHz | At 16kHz |
+|-------|-----------|---------|----------|
+| DeepFilterNet | 160-480 samples | 20-60ms | 10-30ms |
+| Silero VAD | 256 samples | 32ms | 16ms |
+| WebRTC | Varies | 10-60ms | - |
+
+The orchestrator uses ring buffers to align frames correctly.
+
+## Testing
 
 ```bash
-# Unit tests
+# Test individual components
 cargo test
 
-# Integration tests (requires backend services)
-cargo test --features integration -- --ignored
+# Test full pipeline
+../scripts/test-full-pipeline.sh
+
+# Manual voice cloning test
+curl -X POST http://localhost:8002/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "OpenMOSS-Team/MOSS-TTS-Realtime",
+    "input": "Hello with cloned voice",
+    "response_format": "pcm",
+    "extra_body": {"reference_audio": "<base64>"}
+  }'
 ```
+
+## Troubleshooting
+
+### DeepFilterNet won't compile
+```bash
+# Ensure you have latest Rust
+cargo update
+```
+
+### VAD model not found
+```bash
+# Download Silero VAD
+curl -L -o models/silero_vad.onnx \
+  https://github.com/snakers4/silero-vad/releases/download/v6.2.1/silero_vad.onnx
+```
+
+### Audio sounds distorted
+- Check reference audio format (must be WAV, mono, 16kHz)
+- Verify `TTS_VOICE_FILE` path is absolute
+- Ensure no background noise in reference clip
 
 ## License
 
@@ -187,3 +205,8 @@ cargo test --features integration -- --ignored
 ## Contributing
 
 [Your Contributing Guidelines]
+
+---
+
+**Built for DGX Spark (GB10) with Blackwell SM121**  
+**Target: 300+ concurrent calls with <250ms E2E latency**

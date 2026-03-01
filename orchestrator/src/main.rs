@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn, error};
 
 mod agent;
+mod audio_pipeline;
 mod vad;
 
 use agent::{AgentConfig, TelephonyAgent};
