@@ -6,7 +6,15 @@ Native PyTorch implementation with OpenAI-compatible API
 CRITICAL: Uses StreamingResponse for real-time audio streaming (20ms chunks)
 """
 
+# CRITICAL: Set HuggingFace cache to avoid permission issues
 import os
+os.environ['HF_HOME'] = '/tmp/hf_cache'
+os.environ['TRANSFORMERS_CACHE'] = '/tmp/hf_cache'
+os.environ['HUGGINGFACE_HUB_CACHE'] = '/tmp/hf_cache'
+
+# Create cache directory
+os.makedirs('/tmp/hf_cache', exist_ok=True)
+
 import sys
 import io
 import json
@@ -14,9 +22,11 @@ import base64
 import asyncio
 import torch
 import torchaudio
+import torchaudio.functional as F
 import numpy as np
+import soundfile as sf
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, Union
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -174,45 +184,78 @@ async def list_models():
     }
 
 
-def encode_reference_audio(audio_path_or_bytes, codec, device):
-    """Encode reference audio to tokens for voice cloning"""
+def decode_audio_with_soundfile(audio_path_or_bytes: Union[str, bytes]) -> tuple[torch.Tensor, int]:
+    """
+    Decode audio using soundfile (bypasses broken torchcodec).
+    Returns (wav_tensor, sample_rate) where wav_tensor is [1, T].
+    """
     if isinstance(audio_path_or_bytes, str):
         # Load from file path
-        wav, sr = torchaudio.load(audio_path_or_bytes)
+        data, samplerate = sf.read(audio_path_or_bytes, dtype='float32')
     else:
         # Load from bytes
         buffer = io.BytesIO(audio_path_or_bytes)
-        wav, sr = torchaudio.load(buffer)
+        data, samplerate = sf.read(buffer, dtype='float32')
     
-    if sr != CODEC_SAMPLE_RATE:
-        wav = torchaudio.functional.resample(wav, sr, CODEC_SAMPLE_RATE)
-    if wav.ndim == 2 and wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    
-    waveform = wav.unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        encode_result = codec.encode(waveform, chunk_duration=8)
-        
-    # Extract codes from result
-    if isinstance(encode_result, dict):
-        codes = encode_result["audio_codes"]
-    elif hasattr(encode_result, "audio_codes"):
-        codes = encode_result.audio_codes
+    # soundfile returns shape (T,) for mono, (T, C) for multi-channel
+    if data.ndim == 1:
+        data = data.reshape(1, -1)  # [1, T]
     else:
-        codes = encode_result
-        
-    if isinstance(codes, np.ndarray):
-        codes = torch.from_numpy(codes)
+        data = data.T  # [C, T]
     
-    # Reshape to expected format
-    if codes.dim() == 3:
-        if codes.shape[1] == 1:
-            codes = codes[:, 0, :]
-        elif codes.shape[0] == 1:
-            codes = codes[0]
+    wav_tensor = torch.from_numpy(data)
+    
+    # Convert to mono if stereo
+    if wav_tensor.shape[0] > 1:
+        wav_tensor = wav_tensor.mean(dim=0, keepdim=True)
+    
+    return wav_tensor, samplerate
+
+
+def encode_reference_audio(audio_path_or_bytes, codec, device):
+    """
+    Encode reference audio to tokens for voice cloning.
+    Uses soundfile to bypass torchcodec dependency.
+    """
+    try:
+        # Decode audio using soundfile (not torchaudio/torchcodec)
+        wav, sr = decode_audio_with_soundfile(audio_path_or_bytes)
+        
+        # Resample to codec sample rate (24kHz for MOSS-TTS)
+        if sr != CODEC_SAMPLE_RATE:
+            wav = F.resample(wav, sr, CODEC_SAMPLE_RATE)
+        
+        # Move to device and add batch dimension [1, 1, T]
+        waveform = wav.unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            encode_result = codec.encode(waveform, chunk_duration=8)
+        
+        # Extract codes from result
+        if isinstance(encode_result, dict):
+            codes = encode_result["audio_codes"]
+        elif hasattr(encode_result, "audio_codes"):
+            codes = encode_result.audio_codes
+        else:
+            codes = encode_result
             
-    return codes.detach().cpu().numpy()
+        if isinstance(codes, np.ndarray):
+            codes = torch.from_numpy(codes)
+        
+        # Reshape to expected format
+        if codes.dim() == 3:
+            if codes.shape[1] == 1:
+                codes = codes[:, 0, :]
+            elif codes.shape[0] == 1:
+                codes = codes[0]
+                
+        return codes.detach().cpu().numpy()
+        
+    except Exception as e:
+        print(f"CRITICAL: Failed to encode reference audio: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 async def generate_audio_stream(

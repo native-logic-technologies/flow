@@ -1,0 +1,27 @@
+[Unit]
+Description=Rust Telephony Orchestrator (CleanS2S)
+After=network.target nemotron-llm.service voxtral-asr.service moss-tts.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=phil
+Group=phil
+WorkingDirectory=/home/phil/telephony-stack/orchestrator
+Environment="RUST_LOG=info"
+Environment="LLM_URL=http://localhost:8000/v1"
+Environment="ASR_URL=http://localhost:8001/v1"
+Environment="TTS_URL=http://localhost:8002/v1"
+Environment="VAD_MODEL_PATH=/home/phil/telephony-stack/orchestrator/models/silero_vad.onnx"
+Environment="BIND_ADDRESS=0.0.0.0:8080"
+
+ExecStart=/home/phil/telephony-stack/orchestrator/target/release/telephony-orchestrator
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telephony-orchestrator
+
+[Install]
+WantedBy=multi-user.target

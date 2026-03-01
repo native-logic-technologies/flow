@@ -1,0 +1,26 @@
+[Unit]
+Description=MOSS-TTS-Realtime Voice Synthesis
+After=network.target nemotron-llm.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=phil
+Group=phil
+WorkingDirectory=/home/phil/telephony-stack
+Environment="PATH=/home/phil/telephony-stack-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="TRITON_PTXAS_PATH=/usr/local/cuda-13.0/bin/ptxas"
+Environment="HF_HOME=/tmp/hf_cache"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/home/phil/telephony-stack/moss-tts-src:/home/phil/telephony-stack/moss-tts-src/moss_tts_realtime"
+
+ExecStart=/home/phil/telephony-stack-env/bin/python /home/phil/telephony-stack/tts/moss_tts_fastapi_server.py
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moss-tts
+
+[Install]
+WantedBy=multi-user.target
