@@ -35,7 +35,7 @@ class LLMBenchmark:
         """Run single benchmark and return metrics"""
         
         payload = {
-            "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+            "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant. Be concise."},
                 {"role": "user", "content": prompt}

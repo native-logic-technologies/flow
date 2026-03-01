@@ -346,7 +346,7 @@ async fn process_llm_tts(
     
     // Call Nemotron LLM with reasoning suppression
     let llm_request = json!({
-        "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
         "messages": messages,
         "stream": true,
         "max_tokens": 150,
