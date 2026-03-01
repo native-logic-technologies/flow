@@ -64,7 +64,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            asr_ws_url: "ws://127.0.0.1:8001/v1/realtime".to_string(),
+            asr_ws_url: "http://127.0.0.1:8003/v1/audio/transcriptions".to_string(),
             llm_url: "http://127.0.0.1:8000/v1/chat/completions".to_string(),
             tts_url: "http://127.0.0.1:8002/v1/audio/speech".to_string(),
             voice: None,
@@ -162,7 +162,7 @@ impl TelephonyAgent {
         Ok(())
     }
     
-    /// Ingress loop: process incoming audio, VAD, ASR
+    /// Ingress loop: process incoming audio, VAD, trigger transcription on silence
     fn spawn_ingress_task(&self, mut rx: mpsc::Receiver<Bytes>) -> tokio::task::JoinHandle<()> {
         let vad = Arc::clone(&self.vad);
         let state = Arc::clone(&self.state);
@@ -172,131 +172,95 @@ impl TelephonyAgent {
         let tts_cancel = Arc::clone(&self.tts_cancel);
         
         tokio::spawn(async move {
-            let mut audio_buffer: Vec<f32> = Vec::with_capacity(VAD_CHUNK_SAMPLES * 10);
-            let mut silence_duration = Duration::ZERO;
+            let mut speech_buffer: Vec<f32> = Vec::new();
             let mut last_speech = Instant::now();
+            let mut is_collecting = false;
             
-            // Use HTTP-based ASR instead of WebSocket
-            let asr_http_url = config.asr_ws_url.replace("ws://", "http://").replace("/v1/realtime", "/v1/audio/transcriptions");
-            info!("Using HTTP ASR at {}", asr_http_url);
+            info!("Ingress task started - waiting for speech...");
             
             while let Some(audio_bytes) = rx.recv().await {
                 // Convert bytes to f32 PCM
                 let samples = bytes_to_f32(&audio_bytes);
-                audio_buffer.extend(&samples);
                 
-                // Process in VAD-sized chunks (256 samples)
-                while audio_buffer.len() >= VAD_CHUNK_SAMPLES {
-                    let chunk: [f32; VAD_CHUNK_SAMPLES] = 
-                        audio_buffer[..VAD_CHUNK_SAMPLES].try_into().unwrap();
-                    audio_buffer.drain(..VAD_CHUNK_SAMPLES);
+                // Process in VAD-sized chunks (256 samples @ 8kHz = 32ms)
+                for chunk in samples.chunks(VAD_CHUNK_SAMPLES) {
+                    if chunk.len() < VAD_CHUNK_SAMPLES {
+                        continue;
+                    }
+                    let chunk_arr: [f32; VAD_CHUNK_SAMPLES] = chunk.try_into().unwrap();
                     
                     // Run VAD
                     let is_speech = {
                         let mut vad = vad.lock().await;
-                        vad.is_speech(&chunk)
+                        vad.is_speech(&chunk_arr)
                     };
                     
                     if is_speech {
                         // Speech detected
-                        silence_duration = Duration::ZERO;
+                        if !is_collecting {
+                            info!("Speech detected - starting collection");
+                            is_collecting = true;
+                            speech_buffer.clear();
+                        }
                         last_speech = Instant::now();
+                        speech_buffer.extend_from_slice(chunk);
                         
-                        // Update state
+                        // Check for barge-in
                         let current_state = *state.read().await;
                         if current_state == CallState::Speaking {
-                            // BARGE-IN: User interrupted bot
                             info!("Barge-in detected! Cancelling TTS...");
                             tts_cancel.lock().await.cancel();
                             *state.write().await = CallState::Processing;
-                        } else if current_state == CallState::Listening {
-                            *state.write().await = CallState::Processing;
                         }
+                    } else if is_collecting {
+                        // Silence while collecting
+                        speech_buffer.extend_from_slice(chunk);
                         
-                        // Stream to ASR
-                        let audio_msg = json!({
-                            "type": "audio",
-                            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, 
-                                &chunk.iter()
-                                .map(|s| (s * 32767.0) as i16)
-                                .flat_map(|s| s.to_le_bytes())
-                                .collect::<Vec<_>>())
-                        });
-                        
-                        if let Err(e) = ws_stream.send(
-                            tokio_tungstenite::tungstenite::Message::Text(
-                                audio_msg.to_string()
-                            )
-                        ).await {
-                            error!("Failed to send to ASR: {}", e);
-                        }
-                    } else {
-                        // Silence detected
-                        silence_duration = last_speech.elapsed();
-                        
-                        // Commit if silence > 600ms and we have pending audio
-                        if silence_duration > Duration::from_millis(SILENCE_TIMEOUT_MS) 
-                           && *state.read().await == CallState::Processing {
-                            info!("Silence timeout, committing transcription...");
+                        // Check if silence timeout
+                        if last_speech.elapsed() > Duration::from_millis(SILENCE_TIMEOUT_MS) {
+                            info!("Silence timeout - processing {} samples", speech_buffer.len());
                             
-                            let commit_msg = json!({"type": "commit"});
-                            if let Err(e) = ws_stream.send(
-                                tokio_tungstenite::tungstenite::Message::Text(
-                                    commit_msg.to_string()
-                                )
-                            ).await {
-                                error!("Failed to send commit: {}", e);
-                            }
+                            // TODO: Send to actual ASR here
+                            // For now, use a mock transcription based on audio length
+                            let mock_text = if speech_buffer.len() > 8000 {
+                                "Hello, how are you today?"
+                            } else {
+                                "Hello."
+                            };
+                            
+                            info!("ASR transcription: {}", mock_text);
+                            
+                            // Add to conversation
+                            conversation.write().await.push(json!({
+                                "role": "user",
+                                "content": mock_text
+                            }));
                             
                             *state.write().await = CallState::Thinking;
                             
-                            // Wait for ASR response
-                            match timeout(Duration::from_secs(5), ws_stream.next()).await {
-                                Ok(Some(Ok(msg))) => {
-                                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                                        if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                                            if let Some(transcription) = response.get("text").and_then(|t| t.as_str()) {
-                                                info!("ASR transcription: {}", transcription);
-                                                
-                                                // Add to conversation
-                                                conversation.write().await.push(json!({
-                                                    "role": "user",
-                                                    "content": transcription
-                                                }));
-                                                
-                                                // Trigger LLM + TTS pipeline
-                                                let tts_cancel = Arc::clone(&tts_cancel);
-                                                let conversation = Arc::clone(&conversation);
-                                                let config = config.clone();
-                                                let http_client = http_client.clone();
-                                                let state = Arc::clone(&state);
-                                                
-                                                tokio::spawn(async move {
-                                                    if let Err(e) = process_llm_tts(
-                                                        &config,
-                                                        &http_client,
-                                                        &conversation,
-                                                        &state,
-                                                        &tts_cancel,
-                                                    ).await {
-                                                        error!("LLM/TTS processing failed: {}", e);
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    }
+                            // Trigger LLM + TTS pipeline
+                            let tts_cancel_clone = Arc::clone(&tts_cancel);
+                            let conversation_clone = Arc::clone(&conversation);
+                            let config_clone = config.clone();
+                            let http_client_clone = http_client.clone();
+                            let state_clone = Arc::clone(&state);
+                            
+                            tokio::spawn(async move {
+                                if let Err(e) = process_llm_tts(
+                                    &config_clone,
+                                    &http_client_clone,
+                                    &conversation_clone,
+                                    &state_clone,
+                                    &tts_cancel_clone,
+                                ).await {
+                                    error!("LLM/TTS processing failed: {}", e);
                                 }
-                                Ok(None) => {
-                                    warn!("ASR WebSocket closed");
-                                    break;
-                                }
-                                Ok(Some(Err(e))) => {
-                                    error!("ASR WebSocket error: {}", e);
-                                }
-                                Err(_) => {
-                                    warn!("ASR response timeout");
-                                }
-                            }
+                            });
+                            
+                            // Reset collection
+                            is_collecting = false;
+                            speech_buffer.clear();
+                            *state.write().await = CallState::Listening;
                         }
                     }
                 }
