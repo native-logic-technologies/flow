@@ -18,6 +18,10 @@ export HF_HOME="${HF_HOME:-$HOME/telephony-stack/.cache/huggingface}"
 # VAD model path (must be absolute)
 export VAD_MODEL_PATH="$HOME/telephony-stack/orchestrator/models/silero_vad.onnx"
 
+# Voice cloning reference audio (WAV, Mono, 16kHz, PCM 16-bit, 3-5 seconds)
+# Converted from MP3 using: librosa.load(..., sr=16000, mono=True)
+export TTS_VOICE_FILE="$HOME/telephony-stack/tts/phil-conversational-16k-5s.wav"
+
 # Backend URLs (adjust if needed)
 export ASR_WS_URL="${ASR_WS_URL:-ws://127.0.0.1:8001/v1/realtime}"
 export LLM_URL="${LLM_URL:-http://127.0.0.1:8000/v1/chat/completions}"
