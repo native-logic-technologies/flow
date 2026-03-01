@@ -279,9 +279,14 @@
                     sampleRate: AUDIO_CONTEXT_SAMPLE_RATE
                 });
                 
-                // Connect WebSocket
+                // Connect WebSocket with retry logic
                 ws = new WebSocket(WS_URL);
                 ws.binaryType = 'arraybuffer';
+                
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    updateStatus('disconnected', 'Connection error - check console');
+                };
                 
                 ws.onopen = () => {
                     isConnected = true;
