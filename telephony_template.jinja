@@ -1,0 +1,21 @@
+{# Clean Telephony Chat Template for Nemotron #}
+{# No reasoning triggers, no thinking tags - just direct response #}
+{% for message in messages %}
+    {% if message['role'] == 'system' %}
+        {{ '<|im_start|>system
+' + message['content'] + '<|im_end|>
+' }}
+    {% elif message['role'] == 'user' %}
+        {{ '<|im_start|>user
+' + message['content'] + '<|im_end|>
+' }}
+    {% elif message['role'] == 'assistant' %}
+        {{ '<|im_start|>assistant
+' + message['content'] + '<|im_end|>
+' }}
+    {% endif %}
+{% endfor %}
+{% if add_generation_prompt %}
+    {{ '<|im_start|>assistant
+' }}
+{% endif %}
