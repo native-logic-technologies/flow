@@ -37,4 +37,5 @@ python -m vllm.entrypoints.openai.api_server \
     --max-model-len 32768 \
     --enforce-eager \
     --trust-remote-code \
-    --port 8000
+    --port 8000 \
+    --no-enable-reasoning

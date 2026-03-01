@@ -67,6 +67,23 @@ async fn main() -> anyhow::Result<()> {
 fn load_config() -> anyhow::Result<AgentConfig> {
     dotenvy::dotenv().ok();
     
+    // Load voice setting
+    let voice = if let Ok(voice_file) = std::env::var("TTS_VOICE_FILE") {
+        // Load reference audio from file for zero-shot cloning
+        match std::fs::read(&voice_file) {
+            Ok(bytes) => {
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+                Some(b64)
+            }
+            Err(e) => {
+                warn!("Failed to load voice file {}: {}", voice_file, e);
+                std::env::var("TTS_VOICE").ok()
+            }
+        }
+    } else {
+        std::env::var("TTS_VOICE").ok()
+    };
+    
     let config = AgentConfig {
         asr_ws_url: std::env::var("ASR_WS_URL")
             .unwrap_or_else(|_| "ws://127.0.0.1:8001/v1/realtime".to_string()),
@@ -74,7 +91,7 @@ fn load_config() -> anyhow::Result<AgentConfig> {
             .unwrap_or_else(|_| "http://127.0.0.1:8000/v1/chat/completions".to_string()),
         tts_url: std::env::var("TTS_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8002/v1/audio/speech".to_string()),
-        voice: std::env::var("TTS_VOICE").ok(),
+        voice,
         system_prompt: std::env::var("LLM_SYSTEM_PROMPT")
             .unwrap_or_else(|_| {
                 "You are a helpful voice assistant for telephone conversations. \
@@ -86,6 +103,9 @@ fn load_config() -> anyhow::Result<AgentConfig> {
     info!("  ASR WebSocket: {}", config.asr_ws_url);
     info!("  LLM HTTP: {}", config.llm_url);
     info!("  TTS HTTP: {}", config.tts_url);
+    if config.voice.is_some() {
+        info!("  Voice: Using zero-shot voice cloning (reference audio provided)");
+    }
     
     Ok(config)
 }

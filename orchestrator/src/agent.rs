@@ -56,7 +56,23 @@ impl Default for AgentConfig {
             llm_url: "http://127.0.0.1:8000/v1/chat/completions".to_string(),
             tts_url: "http://127.0.0.1:8002/v1/audio/speech".to_string(),
             voice: None,
-            system_prompt: "You are a helpful voice assistant.".to_string(),
+            system_prompt: r#"You are a helpful voice assistant on a live phone call. 
+
+CRITICAL INSTRUCTIONS:
+1. Respond instantly - NO internal thinking, reasoning, or monologue
+2. Use natural conversational fillers: "um", "ahh", "let me see", "hmm"
+3. Use pauses: "..." or ".." for natural speech rhythm
+4. Use backchanneling: "Mmm hmm", "I see", "Right", "Got it"
+5. Keep responses SHORT (1-2 sentences typical)
+6. Do NOT use <think>, <thought>, or any reasoning tags
+7. Output ONLY the spoken words - nothing else
+
+Example natural responses:
+- "Um, let me check that for you... okay, I found it."
+- "Mmm hmm, I see... so what you're saying is..."
+- "Ahh, okay... well, the best option would be..."
+
+Remember: This is a voice conversation. Be warm, conversational, and human."#.to_string(),
         }
     }
 }
@@ -316,13 +332,16 @@ async fn process_llm_tts(
         msgs
     };
     
-    // Call Nemotron LLM
+    // Call Nemotron LLM with reasoning suppression
     let llm_request = json!({
         "model": "nvidia/Nemotron-3-Nano-30B",
         "messages": messages,
         "stream": true,
         "max_tokens": 150,
-        "temperature": 0.7
+        "temperature": 0.3,  // Lower temp prevents wandering into reasoning
+        "skip_special_tokens": true,
+        "stop": ["<think>", "</think>", "<thought>", "</thought>"],
+        "bad_words": ["<think>", "</think>", "<thought>", "</thought>", "<|reasoning|>"]
     });
     
     info!("Calling Nemotron LLM...");
@@ -341,6 +360,8 @@ async fn process_llm_tts(
     
     // Stream LLM tokens and buffer sentences
     let mut sentence_buffer = String::new();
+    let mut first_token_buffer = String::new();
+    let mut token_count = 0;
     let mut stream = response.bytes_stream();
     
     while let Some(chunk) = stream.next().await {
@@ -356,7 +377,13 @@ async fn process_llm_tts(
         for line in text.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
-                    // Process remaining buffer
+                    // Process remaining buffers
+                    if !first_token_buffer.is_empty() {
+                        let cleaned = strip_reasoning_tags(&first_token_buffer);
+                        if !cleaned.is_empty() {
+                            sentence_buffer.push_str(&cleaned);
+                        }
+                    }
                     if !sentence_buffer.is_empty() {
                         generate_tts(&sentence_buffer, config, http_client).await?;
                     }
@@ -371,12 +398,30 @@ async fn process_llm_tts(
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
                     {
-                        sentence_buffer.push_str(content);
+                        token_count += 1;
+                        
+                        // First-token buffering: collect first 4 tokens to detect reasoning
+                        if token_count <= 4 {
+                            first_token_buffer.push_str(content);
+                            
+                            // After 4 tokens, check for reasoning tags and flush
+                            if token_count == 4 {
+                                let cleaned = strip_reasoning_tags(&first_token_buffer);
+                                if !cleaned.is_empty() {
+                                    sentence_buffer.push_str(&cleaned);
+                                }
+                            }
+                        } else {
+                            // Normal flow after first tokens
+                            sentence_buffer.push_str(content);
+                        }
                         
                         // Check for sentence end
                         if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') {
-                            generate_tts(&sentence_buffer, config, http_client).await?;
-                            sentence_buffer.clear();
+                            if token_count > 4 {
+                                generate_tts(&sentence_buffer, config, http_client).await?;
+                                sentence_buffer.clear();
+                            }
                         }
                     }
                 }
@@ -386,6 +431,28 @@ async fn process_llm_tts(
     
     *state.write().await = CallState::Listening;
     Ok(())
+}
+
+/// Strip reasoning tags from text (first-token flush protection)
+fn strip_reasoning_tags(text: &str) -> String {
+    // Remove common reasoning tags that might slip through
+    let mut result = text.to_string();
+    let tags = ["<think>", "</think>", "<thought>", "</thought>", "<|reasoning|>"];
+    
+    for tag in &tags {
+        result = result.replace(tag, "");
+    }
+    
+    // Also strip if text starts with < or [ (likely reasoning start)
+    let trimmed = result.trim();
+    if trimmed.starts_with('<') || trimmed.starts_with('[') {
+        // Find first alphanumeric char
+        if let Some(pos) = trimmed.find(|c: char| c.is_alphanumeric()) {
+            result = trimmed[pos..].to_string();
+        }
+    }
+    
+    result.trim().to_string()
 }
 
 /// Generate TTS audio from text
