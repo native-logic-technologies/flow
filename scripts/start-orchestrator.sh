@@ -15,8 +15,8 @@ export CUDA_HOME=/usr/local/cuda-13.0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HOME="${HF_HOME:-$HOME/telephony-stack/.cache/huggingface}"
 
-# VAD model path
-export VAD_MODEL_PATH="${VAD_MODEL_PATH:-$HOME/telephony-stack/orchestrator/models/silero_vad.onnx}"
+# VAD model path (must be absolute)
+export VAD_MODEL_PATH="$HOME/telephony-stack/orchestrator/models/silero_vad.onnx"
 
 # Backend URLs (adjust if needed)
 export ASR_WS_URL="${ASR_WS_URL:-ws://127.0.0.1:8001/v1/realtime}"
@@ -39,5 +39,7 @@ echo ""
 echo "Press Ctrl+C to stop"
 echo ""
 
-# Run the orchestrator
-exec ./orchestrator/target/release/telephony-orchestrator
+# Run the orchestrator from its directory
+export VAD_MODEL_PATH="$HOME/telephony-stack/orchestrator/models/silero_vad.onnx"
+cd orchestrator
+exec ./target/release/telephony-orchestrator

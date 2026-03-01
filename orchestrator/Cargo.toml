@@ -13,11 +13,14 @@ tokio = { version = "1.36", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 # WebSocket for Voxtral ASR realtime API
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 
-# HTTP client for LLM and TTS APIs - using rustls
-reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+# HTTP client for LLM and TTS APIs
+reqwest = { version = "0.12", features = ["stream", "json"] }
+
+# ONNX Runtime for Silero VAD (Zero Python)
+ort = "2.0.0-rc.2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
