@@ -67,7 +67,7 @@ run_benchmark() {
     curl -s -N -X POST "$LLM_URL" \
         -H "Content-Type: application/json" \
         -d "{
-            \"model\": \"nvidia/Nemotron-3-Nano-30B\",
+            \"model\": \"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4\",
             \"messages\": [
                 {\"role\": \"system\", \"content\": \"You are a helpful assistant. Be concise.\"},
                 {\"role\": \"user\", \"content\": \"$prompt\"}
