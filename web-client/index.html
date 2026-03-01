@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanS2S Voice AI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #333;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 500px;
+            width: 90%;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        
+        .status.disconnected {
+            background: #fee;
+            color: #c33;
+        }
+        
+        .status.connecting {
+            background: #ffeaa7;
+            color: #d63031;
+        }
+        
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status.speaking {
+            background: #e3f2fd;
+            color: #1565c0;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        
+        button {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 50px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: #c0392b;
+        }
+        
+        .transcript {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .transcript h3 {
+            margin-bottom: 15px;
+            color: #555;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 10px;
+            animation: fadeIn 0.3s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            background: #667eea;
+            color: white;
+            margin-left: 20%;
+        }
+        
+        .message.bot {
+            background: #e9ecef;
+            color: #333;
+            margin-right: 20%;
+        }
+        
+        .message .label {
+            font-size: 11px;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+        
+        .visualizer {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 60px;
+            margin-bottom: 20px;
+            gap: 3px;
+        }
+        
+        .bar {
+            width: 4px;
+            background: #667eea;
+            border-radius: 2px;
+            transition: height 0.1s;
+        }
+        
+        .info {
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
+        }
+        
+        .latency {
+            display: inline-block;
+            background: #f0f0f0;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ CleanS2S Voice AI</h1>
+        <p class="subtitle">Real-time speech-to-speech on DGX Spark</p>
+        
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="visualizer" id="visualizer">
+            <!-- Audio visualizer bars will be added here -->
+        </div>
+        
+        <div class="controls">
+            <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+        
+        <div class="transcript">
+            <h3>Conversation</h3>
+            <div id="messages"></div>
+        </div>
+        
+        <div class="info">
+            <div>WebSocket: <code>wss://cleans2s.voiceflow.cloud/ws</code></div>
+            <div class="latency" id="latency">Click Connect to start</div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const WS_URL = 'wss://cleans2s.voiceflow.cloud/ws';
+        const AUDIO_CONTEXT_SAMPLE_RATE = 8000;  // Input: 8kHz for VAD
+        const OUTPUT_SAMPLE_RATE = 24000;         // Output: 24kHz from TTS
+        
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let isConnected = false;
+        let audioQueue = [];
+        let isPlaying = false;
+        
+        // Visualizer
+        const visualizer = document.getElementById('visualizer');
+        const bars = [];
+        for (let i = 0; i < 30; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'bar';
+            bar.style.height = '5px';
+            visualizer.appendChild(bar);
+            bars.push(bar);
+        }
+        
+        function updateStatus(status, text) {
+            const el = document.getElementById('status');
+            el.className = 'status ' + status;
+            el.textContent = text;
+        }
+        
+        function addMessage(role, text) {
+            const messages = document.getElementById('messages');
+            const msg = document.createElement('div');
+            msg.className = 'message ' + role;
+            msg.innerHTML = `<div class="label">${role === 'user' ? 'You' : 'AI'}</div>${text}`;
+            messages.appendChild(msg);
+            messages.scrollTop = messages.scrollHeight;
+        }
+        
+        async function connect() {
+            updateStatus('connecting', 'Connecting...');
+            document.getElementById('connectBtn').disabled = true;
+            
+            try {
+                // Get microphone access
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: AUDIO_CONTEXT_SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                
+                // Create audio context
+                audioContext = new AudioContext({
+                    sampleRate: AUDIO_CONTEXT_SAMPLE_RATE
+                });
+                
+                // Connect WebSocket
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                
+                ws.onopen = () => {
+                    isConnected = true;
+                    updateStatus('connected', 'Connected - Speak now!');
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('latency').textContent = 'Listening...';
+                    
+                    // Start audio processing
+                    startAudioProcessing();
+                };
+                
+                ws.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        // Received audio from server - play it
+                        playAudio(event.data);
+                    } else {
+                        // Text message (for debugging)
+                        console.log('Server:', event.data);
+                    }
+                };
+                
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    updateStatus('disconnected', 'Connection error');
+                    disconnect();
+                };
+                
+                ws.onclose = () => {
+                    if (isConnected) {
+                        disconnect();
+                    }
+                };
+                
+            } catch (err) {
+                console.error('Connection failed:', err);
+                updateStatus('disconnected', 'Failed: ' + err.message);
+                document.getElementById('connectBtn').disabled = false;
+            }
+        }
+        
+        function startAudioProcessing() {
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            processor = audioContext.createScriptProcessor(256, 1, 1);
+            
+            processor.onaudioprocess = (e) => {
+                if (!isConnected) return;
+                
+                const inputData = e.inputBuffer.getChannelData(0);
+                
+                // Visualize
+                const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
+                const avg = sum / inputData.length;
+                const height = Math.max(5, Math.min(50, avg * 200));
+                bars.forEach((bar, i) => {
+                    setTimeout(() => {
+                        bar.style.height = height + 'px';
+                    }, i * 20);
+                });
+                
+                // Convert Float32 to Int16 PCM
+                const int16Data = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    int16Data[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                }
+                
+                // Send to server
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(int16Data.buffer);
+                }
+            };
+            
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+        
+        function playAudio(arrayBuffer) {
+            const int16Data = new Int16Array(arrayBuffer);
+            const float32Data = new Float32Array(int16Data.length);
+            
+            for (let i = 0; i < int16Data.length; i++) {
+                float32Data[i] = int16Data[i] / 32768;
+            }
+            
+            // Create audio buffer
+            const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
+            audioBuffer.copyToChannel(float32Data, 0);
+            
+            // Play
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+            
+            updateStatus('speaking', 'AI is speaking...');
+            
+            source.onended = () => {
+                if (isConnected) {
+                    updateStatus('connected', 'Connected - Speak now!');
+                }
+            };
+        }
+        
+        function disconnect() {
+            isConnected = false;
+            
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            updateStatus('disconnected', 'Disconnected');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            document.getElementById('latency').textContent = 'Click Connect to start';
+            
+            // Clear visualizer
+            bars.forEach(bar => bar.style.height = '5px');
+        }
+    </script>
+</body>
+</html>

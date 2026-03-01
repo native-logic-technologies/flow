@@ -1,0 +1,20 @@
+[Unit]
+Description=Cloudflare Tunnel for Telephony Stack
+After=network-online.target telephony-orchestrator.service
+Wants=network-online.target
+After=systemd-networkd-wait-online.service
+
+[Service]
+Type=simple
+User=phil
+Group=phil
+WorkingDirectory=/home/phil
+ExecStart=/usr/local/bin/cloudflared tunnel run 12c14865-8b1b-4989-808d-fe0027dcc8d3
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudflared-tunnel
+
+[Install]
+WantedBy=multi-user.target
