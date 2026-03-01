@@ -64,7 +64,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            asr_ws_url: "http://127.0.0.1:8003/v1/audio/transcriptions".to_string(),
+            asr_ws_url: "http://127.0.0.1:8003/v1/audio/transcriptions".to_string(), // ASR Bridge
             llm_url: "http://127.0.0.1:8000/v1/chat/completions".to_string(),
             tts_url: "http://127.0.0.1:8002/v1/audio/speech".to_string(),
             voice: None,
@@ -220,42 +220,78 @@ impl TelephonyAgent {
                         if last_speech.elapsed() > Duration::from_millis(SILENCE_TIMEOUT_MS) {
                             info!("Silence timeout - processing {} samples", speech_buffer.len());
                             
-                            // TODO: Send to actual ASR here
-                            // For now, use a mock transcription based on audio length
-                            let mock_text = if speech_buffer.len() > 8000 {
-                                "Hello, how are you today?"
-                            } else {
-                                "Hello."
-                            };
+                            // Send to ASR Bridge
+                            let asr_url = config.asr_ws_url.clone();
+                            let http_client = http_client.clone();
                             
-                            info!("ASR transcription: {}", mock_text);
+                            // Convert f32 samples back to i16 PCM
+                            let pcm_bytes: Vec<u8> = speech_buffer
+                                .iter()
+                                .map(|&s| (s * 32767.0) as i16)
+                                .flat_map(|s| s.to_le_bytes().to_vec())
+                                .collect();
                             
-                            // Add to conversation
-                            conversation.write().await.push(json!({
-                                "role": "user",
-                                "content": mock_text
-                            }));
+                            let audio_b64 = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &pcm_bytes
+                            );
                             
-                            *state.write().await = CallState::Thinking;
-                            
-                            // Trigger LLM + TTS pipeline
-                            let tts_cancel_clone = Arc::clone(&tts_cancel);
-                            let conversation_clone = Arc::clone(&conversation);
-                            let config_clone = config.clone();
-                            let http_client_clone = http_client.clone();
-                            let state_clone = Arc::clone(&state);
-                            
-                            tokio::spawn(async move {
-                                if let Err(e) = process_llm_tts(
-                                    &config_clone,
-                                    &http_client_clone,
-                                    &conversation_clone,
-                                    &state_clone,
-                                    &tts_cancel_clone,
-                                ).await {
-                                    error!("LLM/TTS processing failed: {}", e);
-                                }
+                            let asr_request = json!({
+                                "audio": audio_b64,
+                                "sample_rate": 8000,
+                                "language": "en",
+                                "format": "pcm"
                             });
+                            
+                            match http_client.post(&asr_url)
+                                .json(&asr_request)
+                                .timeout(Duration::from_secs(10))
+                                .send().await 
+                            {
+                                Ok(resp) => {
+                                    if resp.status().is_success() {
+                                        if let Ok(asr_result) = resp.json::<serde_json::Value>().await {
+                                            if let Some(text) = asr_result.get("text").and_then(|t| t.as_str()) {
+                                                info!("ASR transcription: {}", text);
+                                                
+                                                if !text.is_empty() && text != "[Transcription failed]" {
+                                                    // Add to conversation
+                                                    conversation.write().await.push(json!({
+                                                        "role": "user",
+                                                        "content": text
+                                                    }));
+                                                    
+                                                    *state.write().await = CallState::Thinking;
+                                                    
+                                                    // Trigger LLM + TTS pipeline
+                                                    let tts_cancel_clone = Arc::clone(&tts_cancel);
+                                                    let conversation_clone = Arc::clone(&conversation);
+                                                    let config_clone = config.clone();
+                                                    let http_client_clone = http_client.clone();
+                                                    let state_clone = Arc::clone(&state);
+                                                    
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = process_llm_tts(
+                                                            &config_clone,
+                                                            &http_client_clone,
+                                                            &conversation_clone,
+                                                            &state_clone,
+                                                            &tts_cancel_clone,
+                                                        ).await {
+                                                            error!("LLM/TTS processing failed: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        error!("ASR request failed: {}", resp.status());
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("ASR request error: {}", e);
+                                }
+                            }
                             
                             // Reset collection
                             is_collecting = false;
