@@ -1,0 +1,37 @@
+port: 7880
+bind: 0.0.0.0
+rtc:
+  port_range_start: 50000
+  port_range_end: 51000
+  udp_port: 7882
+  use_external_ip: false
+  ips:
+    - 127.0.0.1
+
+redis:
+  address: localhost:6379
+
+keys:
+  APIQp4vjmCjrWQ9: PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l
+
+webhook:
+  api_key: APIQp4vjmCjrWQ9
+
+room:
+  enabled_codecs:
+    - mime: audio/opus
+      fmtp_line: minptime=10;useinbandfec=1
+    - mime: audio/pcmu
+    - mime: audio/pcma
+
+turn:
+  enabled: true
+  domain: localhost
+  tls_port: 5349
+  udp_port: 3478
+  relay_range_start: 30000
+  relay_range_end: 31000
+
+logging:
+  level: debug
+  pion_level: info

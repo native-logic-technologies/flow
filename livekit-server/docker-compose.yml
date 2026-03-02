@@ -1,0 +1,30 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.9.11
+    command: >
+      --dev
+      --bind 0.0.0.0
+      --port 7880
+      --node-ip 127.0.0.1
+      --keys "LIVEKIT_API_KEY: LIVEKIT_API_SECRET"
+    network_mode: host
+    environment:
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-APIQp4vjmCjrWQ9}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-$(cat api_secret.txt 2>/dev/null || openssl rand -base64 32)}
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    volumes:
+      - ./livekit.yaml:/livekit.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:7880"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    network_mode: host
+    restart: unless-stopped

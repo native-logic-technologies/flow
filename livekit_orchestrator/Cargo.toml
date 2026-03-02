@@ -1,0 +1,50 @@
+[package]
+name = "livekit_orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# LiveKit - uses prebuilt FFI library
+livekit = { version = "0.7", features = ["tokio", "rustls-tls-webpki-roots"] }
+livekit-api = "0.4"
+libwebrtc = "0.3"
+
+# Audio Processing (optional features - not enabled by default)
+# deep_filter = { version = "0.2", optional = true }
+# ort = { version = "2.0.0-rc.2", optional = true }
+
+# Async & Networking
+tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7" }
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "multipart"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures = "0.3"
+futures-util = "0.3"
+
+# Audio Utilities
+rubato = "0.14"
+ringbuf = "0.3"
+byteorder = "1.5"
+hound = "3.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Utils
+dotenvy = "0.15"
+uuid = { version = "1.7", features = ["v4"] }
+
+[features]
+default = []
+# audio_filter = ["dep:deep_filter", "dep:ort"]
+
+# Build script to link against prebuilt FFI
+[package.metadata]
+ffi_version = "0.12.48"
