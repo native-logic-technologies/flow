@@ -40,8 +40,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Helper function to convert tensor to PCM bytes
-def tensor_to_pcm_bytes(chunk_tensor, apply_agc: bool = True) -> bytes:
-    """Convert audio tensor to int16 PCM bytes with optional Automatic Gain Control."""
+def tensor_to_pcm_bytes(chunk_tensor) -> bytes:
+    """Convert audio tensor to int16 PCM bytes.
+    
+    NO AGC - MOSS-TTS outputs normalized audio. Just clamp and scale.
+    """
     if chunk_tensor is None or chunk_tensor.numel() == 0:
         return b""
     
@@ -52,40 +55,8 @@ def tensor_to_pcm_bytes(chunk_tensor, apply_agc: bool = True) -> bytes:
     # Move to CPU, convert to float32, get numpy
     audio_np = chunk_tensor.squeeze().cpu().detach().float().numpy().reshape(-1)
     
-    # Check amplitude
-    max_amp = float(np.max(np.abs(audio_np)))
-    
-    if max_amp == 0.0:
-        return b""
-    
-    # Automatic Gain Control (AGC): Boost quiet audio to target level
-    # Strategy:
-    # - max_amp < 0.01: Startup noise, use gentle gain (10x max)
-    # - 0.01 <= max_amp < 0.30: Normal speech, full AGC
-    # - max_amp >= 0.30: Already loud, no boost needed
-    
-    TARGET_AMP = 0.60  # Target 60% of full scale
-    NOISE_FLOOR = 0.01  # Below this is startup noise
-    MAX_GAIN = 50.0  # Cap gain to prevent distortion
-    STARTUP_GAIN = 10.0  # Gentler gain for startup
-    
-    if apply_agc and max_amp < 0.30:
-        if max_amp >= NOISE_FLOOR:
-            # Normal speech - full AGC
-            gain = min(TARGET_AMP / max_amp, MAX_GAIN)
-        else:
-            # Startup noise - gentle gain only
-            gain = STARTUP_GAIN
-        audio_np = audio_np * gain
-        print(f"DEBUG: AGC - max_amp={max_amp:.4f}, gain={gain:.2f}x", flush=True)
-    elif max_amp >= 0.30 and max_amp <= 1.0:
-        # Good level, no AGC needed
-        pass
-    elif max_amp > 1.0:
-        # Hard limiter
-        audio_np = np.clip(audio_np, -1.0, 1.0)
-    
-    # Final clamp and convert to int16
+    # Simple clamp to [-1, 1] and scale to 16-bit PCM
+    # This is the ONLY math needed - MOSS-TTS outputs normalized audio
     audio_np = np.clip(audio_np, -1.0, 1.0)
     pcm_16 = (audio_np * 32767.0).astype(np.int16)
     
