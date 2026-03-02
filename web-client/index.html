@@ -403,6 +403,14 @@
                 ws.onopen = async () => {
                     isConnected = true;
                     updateStatus('connected', 'Connected - Type a message!');
+                    
+                    // Start live latency updater
+                    setInterval(() => {
+                        if (messageStartTime && !firstAudioTime) {
+                            // Still waiting for response
+                            updateLatencyStats();
+                        }
+                    }, 100);
                     document.getElementById('textDisconnectBtn').disabled = false;
                     document.getElementById('textInput').focus();
                     
@@ -759,15 +767,24 @@
             
             const ttft = firstTokenTime && messageStartTime ? (firstTokenTime - messageStartTime).toFixed(0) + 'ms' : '--';
             const tts = firstAudioTime && messageStartTime ? (firstAudioTime - messageStartTime).toFixed(0) + 'ms' : '--';
-            const buffer = nextPlayTime && audioContext ? (nextPlayTime - audioContext.currentTime).toFixed(2) + 's' : '--';
+            
+            // Buffer calculation - ensure non-negative
+            let buffer = '--';
+            if (nextPlayTime && audioContext && audioContext.state === 'running') {
+                const bufferSecs = nextPlayTime - audioContext.currentTime;
+                buffer = Math.max(0, bufferSecs).toFixed(2) + 's';
+            }
             
             document.getElementById('ttftStat').textContent = `TTFT: ${ttft}`;
             document.getElementById('ttsStat').textContent = `TTS: ${tts}`;
             document.getElementById('bufferStat').textContent = `Buffer: ${buffer}`;
             
-            if (firstAudioTime && messageStartTime) {
-                const total = (firstAudioTime - messageStartTime).toFixed(0);
-                document.getElementById('totalStat').textContent = `Total E2E: ${total}ms`;
+            // Show total latency (pending or completed)
+            if (messageStartTime) {
+                const endTime = firstAudioTime || performance.now();
+                const total = (endTime - messageStartTime).toFixed(0);
+                const label = firstAudioTime ? 'Total E2E' : 'Waiting';
+                document.getElementById('totalStat').textContent = `${label}: ${total}ms`;
             }
         }
         
