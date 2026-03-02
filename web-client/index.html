@@ -315,6 +315,9 @@
         <div class="info">
             <div>WebSocket: <code>wss://cleans2s.voiceflow.cloud/ws</code></div>
             <div class="latency" id="latency">Click Connect to start</div>
+            <div style="margin-top: 10px;">
+                <button class="btn-primary" onclick="testAudio()" style="font-size: 12px; padding: 5px 10px;">Test Audio</button>
+            </div>
         </div>
     </div>
 
@@ -329,6 +332,9 @@
         let mediaStream = null;
         let processor = null;
         let isConnected = false;
+        
+        // Audio scheduling for gapless playback
+        let nextPlayTime = 0;
         let currentMode = 'voice';
         
         // Visualizer setup
@@ -375,20 +381,39 @@
                 ws = new WebSocket(WS_URL);
                 ws.binaryType = 'arraybuffer';
                 
-                ws.onopen = () => {
+                ws.onopen = async () => {
                     isConnected = true;
                     updateStatus('connected', 'Connected - Type a message!');
                     document.getElementById('textDisconnectBtn').disabled = false;
                     document.getElementById('textInput').focus();
                     
+                    // Initialize audio context for text mode too
+                    if (!audioContext) {
+                        audioContext = new AudioContext({
+                            sampleRate: OUTPUT_SAMPLE_RATE
+                        });
+                    }
+                    
+                    // CRITICAL: Resume audio context (browsers block autoplay)
+                    if (audioContext.state === 'suspended') {
+                        console.log('Resuming audio context...');
+                        await audioContext.resume();
+                        console.log('Audio context resumed, state:', audioContext.state);
+                    }
+                    
+                    // Reset audio scheduler for new conversation
+                    nextPlayTime = 0;
+                    console.log('🔄 Audio scheduler reset');
+                    
                     // Send a test ping
                     ws.send(JSON.stringify({type: "ping"}));
                 };
                 
-                ws.onmessage = (event) => {
+                ws.onmessage = async (event) => {
                     if (event.data instanceof ArrayBuffer) {
                         // Received audio - play it
-                        playAudio(event.data);
+                        console.log('Received audio:', event.data.byteLength, 'bytes');
+                        await playAudio(event.data);
                     } else {
                         console.log('Server:', event.data);
                     }
@@ -452,23 +477,38 @@
                     }
                 });
                 
+                // CRITICAL: Create AudioContext at OUTPUT rate (24kHz), not input rate
+                // The browser will resample microphone input automatically
                 audioContext = new AudioContext({
-                    sampleRate: AUDIO_CONTEXT_SAMPLE_RATE
+                    sampleRate: OUTPUT_SAMPLE_RATE
                 });
                 
                 ws = new WebSocket(WS_URL);
                 ws.binaryType = 'arraybuffer';
                 
-                ws.onopen = () => {
+                ws.onopen = async () => {
                     isConnected = true;
                     updateStatus('connected', 'Connected - Speak now!');
                     document.getElementById('disconnectBtn').disabled = false;
+                    
+                    // CRITICAL: Resume audio context (browsers block autoplay)
+                    if (audioContext.state === 'suspended') {
+                        console.log('Resuming audio context...');
+                        await audioContext.resume();
+                        console.log('Audio context resumed, state:', audioContext.state);
+                    }
+                    
+                    // Reset audio scheduler for new conversation
+                    nextPlayTime = 0;
+                    console.log('🔄 Audio scheduler reset');
+                    
                     startAudioProcessing();
                 };
                 
-                ws.onmessage = (event) => {
+                ws.onmessage = async (event) => {
                     if (event.data instanceof ArrayBuffer) {
-                        playAudio(event.data);
+                        console.log('Received audio:', event.data.byteLength, 'bytes');
+                        await playAudio(event.data);
                     } else {
                         console.log('Server:', event.data);
                     }
@@ -526,29 +566,145 @@
             processor.connect(audioContext.destination);
         }
         
-        function playAudio(arrayBuffer) {
-            const int16Data = new Int16Array(arrayBuffer);
-            const float32Data = new Float32Array(int16Data.length);
+        // Test audio playback
+        async function testAudio() {
+            console.log('Testing audio playback...');
             
-            for (let i = 0; i < int16Data.length; i++) {
-                float32Data[i] = int16Data[i] / 32768;
+            // Create audio context if needed
+            if (!audioContext) {
+                audioContext = new AudioContext({
+                    sampleRate: OUTPUT_SAMPLE_RATE
+                });
             }
             
-            const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
-            audioBuffer.copyToChannel(float32Data, 0);
+            // Resume if suspended
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            
+            console.log('AudioContext state:', audioContext.state);
+            
+            // Generate a simple test tone (1kHz sine wave for 0.5s)
+            const duration = 0.5;
+            const sampleRate = OUTPUT_SAMPLE_RATE;
+            const numSamples = duration * sampleRate;
+            const buffer = audioContext.createBuffer(1, numSamples, sampleRate);
+            const data = buffer.getChannelData(0);
+            
+            for (let i = 0; i < numSamples; i++) {
+                data[i] = Math.sin(2 * Math.PI * 1000 * i / sampleRate) * 0.3;
+            }
             
             const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
+            source.buffer = buffer;
             source.connect(audioContext.destination);
             source.start();
             
-            updateStatus('speaking', 'AI is speaking...');
+            console.log('Test tone playing...');
+            updateStatus('speaking', 'Playing test tone...');
             
             source.onended = () => {
-                if (isConnected) {
-                    updateStatus('connected', currentMode === 'voice' ? 'Connected - Speak now!' : 'Connected - Type a message!');
-                }
+                updateStatus('connected', 'Audio test complete');
             };
+        }
+        
+        async function playAudio(arrayBuffer) {
+            console.log('🔊 playAudio called with', arrayBuffer.byteLength, 'bytes');
+            
+            // Ensure audio context exists
+            if (!audioContext) {
+                console.log('Creating new AudioContext');
+                audioContext = new AudioContext({
+                    sampleRate: OUTPUT_SAMPLE_RATE
+                });
+            }
+            
+            // Resume audio context if suspended (browser requirement)
+            if (audioContext.state === 'suspended') {
+                console.log('Resuming suspended audio context');
+                await audioContext.resume();
+            }
+            
+            console.log('AudioContext state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+            
+            try {
+                // Verify we have data
+                if (arrayBuffer.byteLength === 0) {
+                    console.error('❌ Empty audio buffer');
+                    return;
+                }
+                
+                // CRITICAL FIX: Ensure even byte length for Int16Array
+                // Network fragmentation can cause odd byte counts
+                const validByteLength = arrayBuffer.byteLength - (arrayBuffer.byteLength % 2);
+                if (validByteLength !== arrayBuffer.byteLength) {
+                    console.warn(`⚠️ Odd byte length ${arrayBuffer.byteLength}, trimming to ${validByteLength}`);
+                }
+                const safeBuffer = arrayBuffer.slice(0, validByteLength);
+                
+                // Convert Int16 PCM to Float32
+                const int16Data = new Int16Array(safeBuffer);
+                
+                // Calculate max amplitude
+                let maxAmp = 0;
+                for (let i = 0; i < int16Data.length; i++) {
+                    const abs = Math.abs(int16Data[i]);
+                    if (abs > maxAmp) maxAmp = abs;
+                }
+                
+                const duration = int16Data.length / OUTPUT_SAMPLE_RATE;
+                console.log(`📊 Chunk: ${int16Data.length} samples, ${duration.toFixed(3)}s, maxAmp: ${maxAmp}`);
+                
+                // Convert to Float32
+                const float32Data = new Float32Array(int16Data.length);
+                for (let i = 0; i < int16Data.length; i++) {
+                    float32Data[i] = int16Data[i] / 32768.0;
+                }
+                
+                // CRITICAL: Schedule audio chunks back-to-back using AudioContext clock
+                // If the queue is empty/finished, reset to "now"
+                if (nextPlayTime < audioContext.currentTime) {
+                    nextPlayTime = audioContext.currentTime;
+                    console.log('🔄 Reset schedule to now:', nextPlayTime.toFixed(3));
+                }
+                
+                // CRITICAL FIX: Limit buffer size to prevent drift
+                // If we're more than 1.5 seconds ahead, drop to maintain low latency
+                const MAX_BUFFER_AHEAD = 1.5; // seconds
+                const bufferAhead = nextPlayTime - audioContext.currentTime;
+                if (bufferAhead > MAX_BUFFER_AHEAD) {
+                    console.warn(`⚠️ Buffer too large (${bufferAhead.toFixed(2)}s), resetting to limit latency`);
+                    nextPlayTime = audioContext.currentTime + 0.1; // Small head start
+                }
+                
+                // Create audio buffer
+                const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
+                audioBuffer.getChannelData(0).set(float32Data);
+                
+                // Schedule this chunk to play exactly when the last one finishes
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(nextPlayTime);
+                
+                console.log(`▶️  Scheduled at ${nextPlayTime.toFixed(3)}s (current: ${audioContext.currentTime.toFixed(3)}s)`);
+                updateStatus('speaking', 'AI is speaking...');
+                
+                // Advance the clock for the NEXT incoming chunk
+                nextPlayTime += audioBuffer.duration;
+                
+                source.onended = () => {
+                    // Only reset status when we're actually done (allow buffer time)
+                    if (audioContext.currentTime >= nextPlayTime - 0.1) {
+                        console.log('⏹️  Audio finished playing');
+                        if (isConnected) {
+                            updateStatus('connected', currentMode === 'voice' ? 'Connected - Speak now!' : 'Connected - Type a message!');
+                        }
+                    }
+                };
+            } catch (err) {
+                console.error('❌ Error playing audio:', err);
+            }
         }
         
         function disconnect() {

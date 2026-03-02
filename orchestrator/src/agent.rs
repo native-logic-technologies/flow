@@ -122,7 +122,13 @@ impl TelephonyAgent {
             vad: Arc::new(Mutex::new(vad)),
             state: Arc::new(RwLock::new(CallState::Listening)),
             tts_cancel: Arc::new(Mutex::new(CancellationToken::new())),
-            conversation: Arc::new(RwLock::new(Vec::new())),
+            conversation: Arc::new(RwLock::new(vec![
+                // Pre-load the greeting so LLM knows it already introduced itself
+                json!({
+                    "role": "assistant",
+                    "content": "Hey there! I'm Phil. How can I help you today?"
+                })
+            ])),
             start_time: Instant::now(),
         })
     }
@@ -277,6 +283,7 @@ impl TelephonyAgent {
                                                             &conversation_clone,
                                                             &state_clone,
                                                             &tts_cancel_clone,
+                                                            None, // Voice mode uses normal egress
                                                         ).await {
                                                             error!("LLM/TTS processing failed: {}", e);
                                                         }
@@ -306,47 +313,66 @@ impl TelephonyAgent {
         })
     }
     
-    /// Egress task: would connect to LiveKit audio track
+    /// Egress task: wait for call to end (actual egress handled by WebSocket task in main.rs)
     fn spawn_egress_task(&self, _tx: mpsc::Sender<Bytes>) -> tokio::task::JoinHandle<()> {
-        // Placeholder for LiveKit integration
+        // The actual egress (sending audio to WebSocket) is handled by the egress_handle
+        // in main.rs. This task just waits indefinitely until the call ends.
+        let state = Arc::clone(&self.state);
         tokio::spawn(async move {
-            info!("Egress task started");
-            // LiveKit audio track integration here
+            info!("Egress task started (waiting for call end)");
+            // Wait until call state is Ended
+            loop {
+                let current_state = *state.read().await;
+                if current_state == CallState::Ended {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            info!("Egress task ending (call ended)");
         })
     }
 }
 
 /// Process LLM -> TTS pipeline
-#[instrument(skip(config, http_client, conversation, state, cancel_token))]
+#[instrument(skip(config, http_client, conversation, state, cancel_token, egress_tx))]
 pub async fn process_llm_tts(
     config: &AgentConfig,
     http_client: &Client,
     conversation: &Arc<RwLock<Vec<serde_json::Value>>>,
     state: &Arc<RwLock<CallState>>,
     cancel_token: &Arc<Mutex<CancellationToken>>,
+    egress_tx: Option<&mpsc::Sender<Bytes>>,
 ) -> anyhow::Result<()> {
     *state.write().await = CallState::Thinking;
     
-    // Build messages with system prompt
+    // Build messages with few-shot pattern forcing
+    // This locks the model into "dialogue mode" instead of "thinking mode"
     let messages = {
-        let mut msgs = vec![json!({
-            "role": "system",
-            "content": &config.system_prompt
-        })];
+        let mut msgs = vec![
+            json!({
+                "role": "system",
+                "content": "You are Phil, having a casual phone conversation. Keep responses under 2 sentences. Be direct, friendly, and conversational."
+            }),
+            // Few-shot examples to force the pattern
+            json!({"role": "user", "content": "Hey, is anyone there?"}),
+            json!({"role": "assistant", "content": "Hey! Yeah, I'm here. What's up?"}),
+            json!({"role": "user", "content": "What's the weather like?"}),
+            json!({"role": "assistant", "content": "Um... not sure, but I hope it's sunny! Why do you ask?"}),
+        ];
+        // Add the actual conversation history
         msgs.extend(conversation.read().await.clone());
         msgs
     };
     
-    // Call Nemotron LLM with reasoning suppression
+    // Call Nemotron LLM with pattern forcing
     let llm_request = json!({
         "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
         "messages": messages,
         "stream": true,
-        "max_tokens": 150,
-        "temperature": 0.3,  // Lower temp prevents wandering into reasoning
-        "skip_special_tokens": true,
-        "stop": ["<think>", "</think>", "<thought>", "</thought>"],
-        "bad_words": ["<think>", "</think>", "<thought>", "</thought>", "<|reasoning|>"]
+        "max_tokens": 80,
+        "temperature": 0.4,
+        "presence_penalty": 0.6,
+        "frequency_penalty": 0.3
     });
     
     info!("Calling Nemotron LLM...");
@@ -363,10 +389,8 @@ pub async fn process_llm_tts(
     
     *state.write().await = CallState::Speaking;
     
-    // Stream LLM tokens and buffer sentences
-    let mut sentence_buffer = String::new();
-    let mut first_token_buffer = String::new();
-    let mut token_count = 0;
+    // Stream LLM tokens and collect full response for TTS
+    let mut response_buffer = String::new();
     let mut stream = response.bytes_stream();
     
     while let Some(chunk) = stream.next().await {
@@ -382,15 +406,13 @@ pub async fn process_llm_tts(
         for line in text.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
-                    // Process remaining buffers
-                    if !first_token_buffer.is_empty() {
-                        let cleaned = strip_reasoning_tags(&first_token_buffer);
-                        if !cleaned.is_empty() {
-                            sentence_buffer.push_str(&cleaned);
-                        }
-                    }
-                    if !sentence_buffer.is_empty() {
-                        generate_tts(&sentence_buffer, config, http_client).await?;
+                    // Generate TTS for the complete response
+                    let cleaned = strip_reasoning_tags(&response_buffer);
+                    // CRITICAL: Sanitize for TTS (remove emojis, markdown, etc.)
+                    let tts_ready = sanitize_for_tts(&cleaned);
+                    if !tts_ready.is_empty() && tts_ready.len() >= 10 {
+                        info!("TTS text ({} chars): {}", tts_ready.len(), tts_ready);
+                        generate_tts(&tts_ready, config, http_client, egress_tx).await?;
                     }
                     break;
                 }
@@ -403,31 +425,7 @@ pub async fn process_llm_tts(
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
                     {
-                        token_count += 1;
-                        
-                        // First-token buffering: collect first 4 tokens to detect reasoning
-                        if token_count <= 4 {
-                            first_token_buffer.push_str(content);
-                            
-                            // After 4 tokens, check for reasoning tags and flush
-                            if token_count == 4 {
-                                let cleaned = strip_reasoning_tags(&first_token_buffer);
-                                if !cleaned.is_empty() {
-                                    sentence_buffer.push_str(&cleaned);
-                                }
-                            }
-                        } else {
-                            // Normal flow after first tokens
-                            sentence_buffer.push_str(content);
-                        }
-                        
-                        // Check for sentence end
-                        if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') {
-                            if token_count > 4 {
-                                generate_tts(&sentence_buffer, config, http_client).await?;
-                                sentence_buffer.clear();
-                            }
-                        }
+                        response_buffer.push_str(content);
                     }
                 }
             }
@@ -438,9 +436,9 @@ pub async fn process_llm_tts(
     Ok(())
 }
 
-/// Strip reasoning tags from text (first-token flush protection)
+/// Strip reasoning tags and thinking text from LLM output
 fn strip_reasoning_tags(text: &str) -> String {
-    // Remove common reasoning tags that might slip through
+    // Remove common reasoning tags
     let mut result = text.to_string();
     let tags = ["<think>", "</think>", "<thought>", "</thought>", "<|reasoning|>"];
     
@@ -448,10 +446,33 @@ fn strip_reasoning_tags(text: &str) -> String {
         result = result.replace(tag, "");
     }
     
-    // Also strip if text starts with < or [ (likely reasoning start)
+    // Detect and strip reasoning/thinking patterns
     let trimmed = result.trim();
+    
+    // If it looks like reasoning/instructions, return empty
+    let reasoning_patterns = [
+        "we are starting",
+        "the user said",
+        "as per instructions",
+        "i must respond",
+        "i should",
+        "i can say",
+        "let me",
+        "i need to",
+        "according to",
+        "following the",
+        "the instruction says",
+    ];
+    
+    let lower = trimmed.to_lowercase();
+    for pattern in &reasoning_patterns {
+        if lower.contains(pattern) {
+            return String::new(); // Return empty - this is reasoning
+        }
+    }
+    
+    // Strip if text starts with < or [ (likely reasoning start)
     if trimmed.starts_with('<') || trimmed.starts_with('[') {
-        // Find first alphanumeric char
         if let Some(pos) = trimmed.find(|c: char| c.is_alphanumeric()) {
             result = trimmed[pos..].to_string();
         }
@@ -460,12 +481,33 @@ fn strip_reasoning_tags(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// Sanitize text for TTS - remove emojis, markdown, and special characters
+/// that MOSS-TTS cannot pronounce
+fn sanitize_for_tts(input: &str) -> String {
+    // Filter to ASCII alphanumeric, basic punctuation, and whitespace
+    // Remove emojis, markdown (*, _), brackets, and other special chars
+    input
+        .chars()
+        .filter(|c| {
+            // Keep ASCII alphanumeric
+            c.is_ascii_alphanumeric() ||
+            // Keep basic punctuation (but not * or brackets)
+            (c.is_ascii_punctuation() && *c != '*' && *c != '_' && *c != '[' && *c != ']' && *c != '<' && *c != '>') ||
+            // Keep whitespace
+            c.is_whitespace()
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Generate TTS audio from text
-#[instrument(skip(text, config, http_client))]
-async fn generate_tts(
+#[instrument(skip(text, config, http_client, egress_tx))]
+pub async fn generate_tts(
     text: &str,
     config: &AgentConfig,
     http_client: &Client,
+    egress_tx: Option<&mpsc::Sender<Bytes>>,
 ) -> anyhow::Result<()> {
     info!("Generating TTS for: {}", text);
     
@@ -477,10 +519,12 @@ async fn generate_tts(
     });
     
     // Add zero-shot voice cloning if reference audio provided
+    // CRITICAL: reference_text must be provided and should match the content of the reference audio
     if let Some(ref_audio) = &config.voice {
         if ref_audio.starts_with("data:audio") || ref_audio.len() > 100 {
             tts_request["extra_body"] = json!({
-                "reference_audio": ref_audio
+                "reference_audio": ref_audio,
+                "reference_text": "I really didn't expect the weather to change so quickly."
             });
         }
     }
@@ -497,13 +541,30 @@ async fn generate_tts(
     }
     
     // Stream audio chunks to egress
-    // (In full implementation, send to LiveKit audio track)
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let _chunk = chunk?;
-        // Send to egress channel
-        debug!("Received TTS audio chunk: {} bytes", _chunk.len());
+    let mut total_bytes = 0;
+    let mut chunk_count = 0;
+    
+    info!("Starting TTS audio stream...");
+    
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        let chunk_len = chunk.len();
+        total_bytes += chunk_len;
+        chunk_count += 1;
+        
+        info!("TTS chunk {}: {} bytes", chunk_count, chunk_len);
+        
+        // Send to egress channel if provided
+        if let Some(tx) = egress_tx {
+            if tx.send(chunk).await.is_err() {
+                info!("Egress channel closed, sent {} chunks ({} bytes)", chunk_count, total_bytes);
+                break;
+            }
+        }
     }
+    
+    info!("TTS streaming complete: {} chunks, {} bytes total for text: '{}'", chunk_count, total_bytes, text);
     
     Ok(())
 }

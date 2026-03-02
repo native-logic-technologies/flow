@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio Test</title>
+</head>
+<body>
+    <h1>Audio Context Test</h1>
+    <button id="testBtn">Click to Play Test Tone (1kHz)</button>
+    <div id="log"></div>
+    
+    <script>
+        const log = (msg) => {
+            console.log(msg);
+            document.getElementById('log').innerHTML += '<br>' + msg;
+        };
+        
+        document.getElementById('testBtn').onclick = async () => {
+            log('Creating AudioContext...');
+            const audioContext = new AudioContext({
+                sampleRate: 24000
+            });
+            log('AudioContext state: ' + audioContext.state);
+            
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+                log('Resumed, new state: ' + audioContext.state);
+            }
+            
+            // Generate 1 second of 1kHz sine wave at 24kHz
+            const sampleRate = 24000;
+            const duration = 1;
+            const numSamples = sampleRate * duration;
+            
+            const audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
+            const data = audioBuffer.getChannelData(0);
+            
+            for (let i = 0; i < numSamples; i++) {
+                data[i] = Math.sin(2 * Math.PI * 1000 * i / sampleRate) * 0.3;
+            }
+            
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+            
+            log('Playing 1kHz tone for 1 second...');
+        };
+    </script>
+</body>
+</html>

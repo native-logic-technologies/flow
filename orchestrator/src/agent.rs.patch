@@ -1,0 +1,83 @@
+--- a/orchestrator/src/agent.rs
++++ b/orchestrator/src/agent.rs
+@@ -390,9 +390,13 @@ pub async fn process_llm_tts(
+     
+     *state.write().await = CallState::Speaking;
+     
+-    // Stream LLM tokens and collect full response for TTS
+-    let mut response_buffer = String::new();
++    // Stream LLM tokens and send to TTS sentence-by-sentence
++    // This allows TTS to start generating audio while LLM is still thinking
++    let mut sentence_buffer = String::new();
++    let mut tts_queue = Vec::new();
+     let mut stream = response.bytes_stream();
++    let mut tts_task: Option<tokio::task::JoinHandle<()>> = None;
+     
+     while let Some(chunk) = stream.next().await {
+         if cancel_token.lock().await.is_cancelled() {
+@@ -405,22 +409,45 @@ pub async fn process_llm_tts(
+         // Parse SSE format (data: {...})
+         for line in text.lines() {
+             if let Some(data) = line.strip_prefix("data: ") {
+-                if data == "[DONE]" {
+-                    // Generate TTS for the complete response
+-                    let cleaned = strip_reasoning_tags(&response_buffer);
+-                    // CRITICAL: Sanitize for TTS (remove emojis, markdown, etc.)
+-                    let tts_ready = sanitize_for_tts(&cleaned);
+-                    if !tts_ready.is_empty() && tts_ready.len() >= 10 {
+-                        info!("TTS text ({} chars): {}", tts_ready.len(), tts_ready);
+-                        generate_tts(&tts_ready, config, http_client, egress_tx).await?;
+-                    }
+-                    break;
+-                }
+-                
+                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                     if let Some(content) = json
+                         .get("choices")
+                         .and_then(|c| c.get(0))
+                         .and_then(|c| c.get("delta"))
+                         .and_then(|d| d.get("content"))
+                         .and_then(|c| c.as_str())
+                     {
+-                        response_buffer.push_str(content);
++                        sentence_buffer.push_str(content);
++                        
++                        // Check for sentence end - if so, send to TTS
++                        if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') || content.ends_with('\n') {
++                            let cleaned = strip_reasoning_tags(&sentence_buffer);
++                            let tts_ready = sanitize_for_tts(&cleaned);
++                            
++                            if !tts_ready.is_empty() && tts_ready.len() >= 5 {
++                                info!("Streaming TTS for sentence ({} chars): {}", tts_ready.len(), tts_ready);
++                                
++                                // Clone what we need for the async task
++                                let tts_text = tts_ready.to_string();
++                                let tts_config = config.clone();
++                                let tts_http = http_client.clone();
++                                let tts_egress = egress_tx.map(|tx| tx.clone());
++                                
++                                // Spawn TTS generation in parallel
++                                tokio::spawn(async move {
++                                    if let Err(e) = generate_tts(&tts_text, &tts_config, &tts_http, tts_egress.as_ref()).await {
++                                        error!("TTS generation failed: {}", e);
++                                    }
++                                });
++                            }
++                            
++                            sentence_buffer.clear();
++                        }
++                    }
++                }
++                
++                if data == "[DONE]" {
++                    // Generate TTS for any remaining text
++                    let cleaned = strip_reasoning_tags(&sentence_buffer);
++                    let tts_ready = sanitize_for_tts(&cleaned);
++                    if !tts_ready.is_empty() && tts_ready.len() >= 5 {
++                        info!("Final TTS ({} chars): {}", tts_ready.len(), tts_ready);
++                        generate_tts(&tts_ready, config, http_client, egress_tx).await?;
+                     }
++                    break;
+                 }
+             }
+         }

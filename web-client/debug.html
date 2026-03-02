@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Debug - CleanS2S</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #667eea; }
+        .log {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 13px;
+            height: 300px;
+            overflow-y: auto;
+        }
+        .log-entry { margin: 3px 0; }
+        .log-info { color: #4ecca3; }
+        .log-error { color: #e74c3c; }
+        .log-warn { color: #f39c12; }
+        .log-data { color: #3498db; }
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover { background: #764ba2; }
+        .status-box {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        .connected { color: #4ecca3; }
+        .disconnected { color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Audio Debug Tool</h1>
+        
+        <div>
+            <button onclick="startDebug()">🚀 Start Debug Session</button>
+            <button onclick="testLocalAudio()">🎵 Test Local Audio</button>
+            <button onclick="clearLog()">Clear Log</button>
+        </div>
+        
+        <div class="status-box">
+            <strong>WebSocket:</strong> <span id="wsStatus" class="disconnected">Not connected</span><br>
+            <strong>AudioContext:</strong> <span id="acStatus" class="disconnected">Not created</span><br>
+            <strong>Audio State:</strong> <span id="audioState">-</span><br>
+            <strong>Received Chunks:</strong> <span id="chunkCount">0</span> 
+            (<span id="totalBytes">0</span> bytes)
+        </div>
+        
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        const WS_URL = 'wss://cleans2s.voiceflow.cloud/ws';
+        const OUTPUT_SAMPLE_RATE = 24000;
+        
+        let ws = null;
+        let audioContext = null;
+        let nextPlayTime = 0;
+        let chunksReceived = 0;
+        let totalBytes = 0;
+        
+        function log(msg, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(`[${type}]`, msg);
+        }
+        
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+        
+        function updateStatus() {
+            document.getElementById('wsStatus').textContent = ws ? 
+                (ws.readyState === WebSocket.OPEN ? 'Connected' : 'Connecting...') : 'Not connected';
+            document.getElementById('wsStatus').className = ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected';
+            
+            document.getElementById('acStatus').textContent = audioContext ? audioContext.state : 'Not created';
+            document.getElementById('acStatus').className = audioContext && audioContext.state === 'running' ? 'connected' : 'disconnected';
+            
+            document.getElementById('audioState').textContent = nextPlayTime > 0 ? 
+                `Scheduling active (next: ${nextPlayTime.toFixed(3)}s)` : 'Idle';
+            document.getElementById('chunkCount').textContent = chunksReceived;
+            document.getElementById('totalBytes').textContent = totalBytes;
+        }
+        
+        async function startDebug() {
+            clearLog();
+            log('Starting debug session...', 'info');
+            
+            // Step 1: Create AudioContext
+            log('Creating AudioContext at 24kHz...', 'info');
+            audioContext = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
+            log(`AudioContext created: state=${audioContext.state}`, 'data');
+            
+            // Step 2: Resume AudioContext (CRITICAL - requires user gesture)
+            if (audioContext.state === 'suspended') {
+                log('Resuming AudioContext (needs user click)...', 'warn');
+                await audioContext.resume();
+                log(`AudioContext resumed: state=${audioContext.state}`, 'data');
+            }
+            
+            // Step 3: Connect WebSocket
+            log(`Connecting to ${WS_URL}...`, 'info');
+            ws = new WebSocket(WS_URL);
+            ws.binaryType = 'arraybuffer';
+            
+            ws.onopen = () => {
+                log('WebSocket connected!', 'info');
+                nextPlayTime = 0;
+                chunksReceived = 0;
+                totalBytes = 0;
+                updateStatus();
+                
+                // Send ping to trigger greeting
+                ws.send(JSON.stringify({type: 'ping'}));
+                log('Sent ping to trigger greeting', 'info');
+            };
+            
+            ws.onmessage = async (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    chunksReceived++;
+                    totalBytes += event.data.byteLength;
+                    log(`Received audio chunk: ${event.data.byteLength} bytes (chunk #${chunksReceived})`, 'data');
+                    updateStatus();
+                    
+                    await playAudioDebug(event.data);
+                } else {
+                    log(`Text message: ${event.data}`, 'info');
+                }
+            };
+            
+            ws.onerror = (err) => {
+                log(`WebSocket error: ${err}`, 'error');
+            };
+            
+            ws.onclose = () => {
+                log('WebSocket closed', 'warn');
+                updateStatus();
+            };
+            
+            setInterval(updateStatus, 500);
+        }
+        
+        async function playAudioDebug(arrayBuffer) {
+            log(`playAudio called with ${arrayBuffer.byteLength} bytes`, 'info');
+            
+            // Check AudioContext
+            if (!audioContext) {
+                log('ERROR: No AudioContext!', 'error');
+                return;
+            }
+            
+            if (audioContext.state === 'suspended') {
+                log('AudioContext suspended, attempting resume...', 'warn');
+                await audioContext.resume();
+                log(`AudioContext state after resume: ${audioContext.state}`, 'data');
+            }
+            
+            if (arrayBuffer.byteLength === 0) {
+                log('ERROR: Empty buffer!', 'error');
+                return;
+            }
+            
+            try {
+                // Handle odd byte length
+                const validByteLength = arrayBuffer.byteLength - (arrayBuffer.byteLength % 2);
+                if (validByteLength !== arrayBuffer.byteLength) {
+                    log(`Warning: Trimmed odd byte length from ${arrayBuffer.byteLength} to ${validByteLength}`, 'warn');
+                }
+                const safeBuffer = arrayBuffer.slice(0, validByteLength);
+                
+                // Convert Int16 to Float32
+                const int16Data = new Int16Array(safeBuffer);
+                
+                // Check amplitude
+                let maxAmp = 0;
+                let sumAmp = 0;
+                for (let i = 0; i < int16Data.length; i++) {
+                    const abs = Math.abs(int16Data[i]);
+                    maxAmp = Math.max(maxAmp, abs);
+                    sumAmp += abs;
+                }
+                const avgAmp = sumAmp / int16Data.length;
+                
+                const duration = int16Data.length / OUTPUT_SAMPLE_RATE;
+                log(`Audio stats: ${int16Data.length} samples, ${duration.toFixed(3)}s, maxAmp=${maxAmp}, avgAmp=${avgAmp.toFixed(1)}`, 'data');
+                
+                if (maxAmp < 100) {
+                    log('WARNING: Very low amplitude! Audio might be silent.', 'warn');
+                }
+                
+                // Convert to Float32
+                const float32Data = new Float32Array(int16Data.length);
+                for (let i = 0; i < int16Data.length; i++) {
+                    float32Data[i] = int16Data[i] / 32768.0;
+                }
+                
+                // Schedule playback
+                if (nextPlayTime < audioContext.currentTime) {
+                    nextPlayTime = audioContext.currentTime;
+                    log(`Schedule reset to now: ${nextPlayTime.toFixed(3)}s`, 'info');
+                }
+                
+                const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
+                audioBuffer.getChannelData(0).set(float32Data);
+                
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(nextPlayTime);
+                
+                log(`▶️  Playing at ${nextPlayTime.toFixed(3)}s (current: ${audioContext.currentTime.toFixed(3)}s)`, 'info');
+                
+                nextPlayTime += audioBuffer.duration;
+                updateStatus();
+                
+                source.onended = () => {
+                    log('⏹️  Audio chunk finished', 'info');
+                };
+                
+            } catch (err) {
+                log(`ERROR playing audio: ${err.message}`, 'error');
+                console.error(err);
+            }
+        }
+        
+        async function testLocalAudio() {
+            log('Testing local audio generation...', 'info');
+            
+            if (!audioContext) {
+                audioContext = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
+            }
+            
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            
+            // Generate test tone
+            const duration = 0.5;
+            const numSamples = duration * OUTPUT_SAMPLE_RATE;
+            const buffer = audioContext.createBuffer(1, numSamples, OUTPUT_SAMPLE_RATE);
+            const data = buffer.getChannelData(0);
+            
+            for (let i = 0; i < numSamples; i++) {
+                data[i] = Math.sin(2 * Math.PI * 1000 * i / OUTPUT_SAMPLE_RATE) * 0.3;
+            }
+            
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start();
+            
+            log('🔊 Test tone playing (1kHz sine wave)', 'info');
+            
+            source.onended = () => {
+                log('Test tone finished', 'info');
+            };
+            
+            updateStatus();
+        }
+        
+        // Auto-update status
+        setInterval(updateStatus, 500);
+    </script>
+</body>
+</html>

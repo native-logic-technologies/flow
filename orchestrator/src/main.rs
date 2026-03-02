@@ -6,7 +6,7 @@ use axum::{
     routing::get,
     Router,
     extract::{ws::{WebSocket, WebSocketUpgrade, Message}, State},
-    response::Response,
+    response::{Response, Html},
 };
 use tokio::sync::mpsc;
 use tracing::{info, warn, error};
@@ -59,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
+        .route("/web-client", get(web_client_handler))
+        .route("/debug", get(debug_handler))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -80,7 +82,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn root_handler() -> &'static str {
-    "Flow Telephony Orchestrator\n\nEndpoints:\n  /health - Health check\n  /ws     - WebSocket for audio streaming\n"
+    "Flow Telephony Orchestrator\n\nEndpoints:\n  /health - Health check\n  /web-client - Web UI\n  /ws     - WebSocket for audio streaming\n"
+}
+
+async fn web_client_handler() -> Html<&'static str> {
+    Html(include_str!("../../web-client/index.html"))
+}
+
+async fn debug_handler() -> Html<&'static str> {
+    Html(include_str!("../../web-client/debug.html"))
 }
 
 async fn health_handler(State(_state): State<AppState>) -> String {
@@ -148,6 +158,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let (ingress_tx, ingress_rx) = mpsc::channel::<bytes::Bytes>(1000);
     let (egress_tx, mut egress_rx) = mpsc::channel::<bytes::Bytes>(1000);
+    let egress_tx_for_text = egress_tx.clone();
     
     // Spawn agent task
     let agent_clone = Arc::clone(&agent);
@@ -163,6 +174,26 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
             if sender.send(Message::Binary(audio.to_vec())).await.is_err() {
                 break;
             }
+        }
+    });
+    
+    // INITIAL GREETING: Spawn a task to play greeting after short delay
+    // This ensures egress task is ready and provides immediate audio feedback
+    let greeting_tx = egress_tx_for_text.clone();
+    let greeting_config = state.config.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let greeting = "Hey there! I'm Phil. How can I help you today?";
+        info!("Playing initial greeting: {}", greeting);
+        
+        let http_client = reqwest::Client::new();
+        if let Err(e) = agent::generate_tts(
+            greeting,
+            &greeting_config,
+            &http_client,
+            Some(&greeting_tx),
+        ).await {
+            error!("Failed to generate greeting: {}", e);
         }
     });
     
@@ -200,6 +231,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                 let config = agent.config.clone();
                                 let http_client = agent.http_client.clone();
                                 let state = Arc::clone(&agent.state);
+                                let egress_tx = egress_tx_for_text.clone();
                                 
                                 tokio::spawn(async move {
                                     if let Err(e) = agent::process_llm_tts(
@@ -208,6 +240,7 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                                         &conversation,
                                         &state,
                                         &tts_cancel,
+                                        Some(&egress_tx),
                                     ).await {
                                         error!("LLM/TTS processing failed: {}", e);
                                     }
@@ -242,9 +275,11 @@ fn load_config() -> anyhow::Result<AgentConfig> {
     dotenvy::dotenv().ok();
     
     let voice = if let Ok(voice_file) = std::env::var("TTS_VOICE_FILE") {
+        info!("Loading voice file from: {}", voice_file);
         match std::fs::read(&voice_file) {
             Ok(bytes) => {
-                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+                info!("Voice file loaded: {} bytes -> {} base64 chars", bytes.len(), b64.len());
                 Some(b64)
             }
             Err(e) => {
@@ -266,18 +301,7 @@ fn load_config() -> anyhow::Result<AgentConfig> {
         voice,
         system_prompt: std::env::var("LLM_SYSTEM_PROMPT")
             .unwrap_or_else(|_| {
-                r#"You are a helpful voice assistant on a live phone call. 
-
-CRITICAL INSTRUCTIONS:
-1. Respond instantly - NO internal thinking, reasoning, or monologue
-2. Use natural conversational fillers: "um", "ahh", "let me see", "hmm"
-3. Use pauses: "..." or ".." for natural speech rhythm
-4. Use backchanneling: "Mmm hmm", "I see", "Right", "Got it"
-5. Keep responses SHORT (1-2 sentences typical)
-6. Do NOT use <think>, <thought>, or any reasoning tags
-7. Output ONLY the spoken words - nothing else
-
-Remember: This is a voice conversation. Be warm, conversational, and human."#.to_string()
+                r#"You are Phil, having a casual phone conversation. Give friendly, conversational responses that are at least 30-40 words (2-3 sentences). Short responses don't work well with the voice system, so please be a bit more verbose. Be warm, engaging, and natural."#.to_string()
             }),
     };
     
@@ -285,6 +309,11 @@ Remember: This is a voice conversation. Be warm, conversational, and human."#.to
     info!("  ASR: {}", config.asr_ws_url);
     info!("  LLM: {}", config.llm_url);
     info!("  TTS: {}", config.tts_url);
+    if config.voice.is_some() {
+        info!("  Voice: loaded (base64)");
+    } else {
+        info!("  Voice: default");
+    }
     
     Ok(config)
 }

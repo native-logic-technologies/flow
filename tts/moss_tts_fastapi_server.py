@@ -38,6 +38,52 @@ sys.path.insert(0, os.path.expanduser("~/telephony-stack/moss-tts-src"))
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+# Helper function to convert tensor to PCM bytes
+def tensor_to_pcm_bytes(chunk_tensor, apply_agc: bool = True) -> bytes:
+    """Convert audio tensor to int16 PCM bytes with optional Automatic Gain Control."""
+    if chunk_tensor is None or chunk_tensor.numel() == 0:
+        return b""
+    
+    if torch.isnan(chunk_tensor).any():
+        print("WARNING: NaN detected in tensor!", flush=True)
+        return b""
+    
+    # Move to CPU, convert to float32, get numpy
+    audio_np = chunk_tensor.squeeze().cpu().detach().float().numpy().reshape(-1)
+    
+    # Check amplitude
+    max_amp = float(np.max(np.abs(audio_np)))
+    
+    if max_amp == 0.0:
+        return b""
+    
+    # Automatic Gain Control (AGC): Boost quiet audio to target level
+    # MOSS-TTS generates very quiet audio for short text (< 15 chars after Phantom Pad)
+    # Target: 50% of full scale (0.5), only boost if below 20% (0.2)
+    TARGET_AMP = 0.60  # Target 60% of full scale
+    MIN_AMP_THRESHOLD = 0.30  # Only boost if below 30%
+    MAX_GAIN = 200.0  # Maximum gain factor (200x) - voice cloning needs extreme boost
+    
+    if apply_agc and max_amp >= NOISE_FLOOR and max_amp < 0.30:
+        gain = min(TARGET_AMP / max_amp, MAX_GAIN)
+        audio_np = audio_np * gain
+        print(f"DEBUG: AGC applied - max_amp={max_amp:.4f}, gain={gain:.2f}x", flush=True)
+    elif max_amp < NOISE_FLOOR:
+        # Noise - don't amplify, just clamp
+        print(f"DEBUG: Noise skipped - max_amp={max_amp:.4f} (below noise floor)", flush=True)
+    elif max_amp > 1.0:
+        # Hard limiter for audio that's too hot
+        audio_np = np.clip(audio_np, -1.0, 1.0)
+        print(f"DEBUG: Limiter applied - max_amp was {max_amp:.4f}", flush=True)
+    
+    # Final clamp and convert to int16
+    audio_np = np.clip(audio_np, -1.0, 1.0)
+    pcm_16 = (audio_np * 32767.0).astype(np.int16)
+    
+    return pcm_16.tobytes()
+
+
 import uvicorn
 
 # Global instances
@@ -215,23 +261,50 @@ def decode_audio_with_soundfile(audio_path_or_bytes: Union[str, bytes]) -> tuple
 def encode_reference_audio(audio_path_or_bytes, codec, device):
     """
     Encode reference audio to tokens for voice cloning.
-    Uses soundfile to bypass torchcodec dependency.
+    CRITICAL: Uses soundfile to read audio, then manually constructs (1, 1, T) tensor.
+    This bypasses the TorchCodec dependency entirely.
     """
     try:
-        # Decode audio using soundfile (not torchaudio/torchcodec)
-        wav, sr = decode_audio_with_soundfile(audio_path_or_bytes)
+        # 1. Decode Base64 to bytes if needed
+        if isinstance(audio_path_or_bytes, str):
+            wav_bytes = base64.b64decode(audio_path_or_bytes)
+        else:
+            wav_bytes = audio_path_or_bytes
         
-        # Resample to codec sample rate (24kHz for MOSS-TTS)
-        if sr != CODEC_SAMPLE_RATE:
-            wav = F.resample(wav, sr, CODEC_SAMPLE_RATE)
+        # 2. Read with soundfile (100% CPU, bypasses torchcodec entirely)
+        # Returns numpy array of shape (T,) for mono or (T, Channels) for stereo
+        audio_np, sample_rate = sf.read(io.BytesIO(wav_bytes), dtype='float32')
         
-        # Move to device and add batch dimension [1, 1, T]
-        waveform = wav.unsqueeze(0).to(device)
+        # 3. Convert numpy to PyTorch Float32 Tensor
+        wav_tensor = torch.from_numpy(audio_np).float()
         
+        # 4. Handle dimensions and force Mono (1 Channel)
+        if wav_tensor.ndim == 1:
+            # Shape was (T,), make it (1, T) for mono
+            wav_tensor = wav_tensor.unsqueeze(0)
+        elif wav_tensor.ndim == 2:
+            # Shape was (T, Channels), transpose to (Channels, T) and average to Mono
+            wav_tensor = wav_tensor.t()
+            wav_tensor = torch.mean(wav_tensor, dim=0, keepdim=True)
+        
+        print(f"DEBUG: Loaded audio shape={wav_tensor.shape}, sr={sample_rate}", flush=True)
+        
+        # 5. Force 24kHz Resampling (F.resample works on tensors without torchcodec)
+        if sample_rate != CODEC_SAMPLE_RATE:
+            print(f"DEBUG: Resampling {sample_rate}Hz -> {CODEC_SAMPLE_RATE}Hz", flush=True)
+            wav_tensor = F.resample(wav_tensor, sample_rate, CODEC_SAMPLE_RATE)
+        
+        # 6. Add the Batch Dimension -> Shape becomes exactly (1, 1, T)
+        # It is currently (1, T). Unsqueeze(0) adds batch dimension at front.
+        waveform = wav_tensor.unsqueeze(0).to(device)
+        
+        print(f"DEBUG: Audio tensor shape ready for codec: {waveform.shape}", flush=True)
+        
+        # 7. Pass to the MOSS tokenizer
         with torch.no_grad():
             encode_result = codec.encode(waveform, chunk_duration=8)
         
-        # Extract codes from result
+        # 8. Extract codes from result
         if isinstance(encode_result, dict):
             codes = encode_result["audio_codes"]
         elif hasattr(encode_result, "audio_codes"):
@@ -242,25 +315,29 @@ def encode_reference_audio(audio_path_or_bytes, codec, device):
         if isinstance(codes, np.ndarray):
             codes = torch.from_numpy(codes)
         
-        # Reshape to expected format
+        # 9. Reshape to expected format [channels, T]
         if codes.dim() == 3:
             if codes.shape[1] == 1:
                 codes = codes[:, 0, :]
             elif codes.shape[0] == 1:
                 codes = codes[0]
-                
-        return codes.detach().cpu().numpy()
+        
+        result = codes.detach().cpu().numpy()
+        print(f"DEBUG: Final prompt tokens shape={result.shape}, range=[{result.min()}, {result.max()}]", flush=True)
+        
+        return result
         
     except Exception as e:
-        print(f"CRITICAL: Failed to encode reference audio: {e}")
+        print(f"CRITICAL ERROR in reference audio: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        raise
+        return None
 
 
 async def generate_audio_stream(
     text: str,
     reference_audio: Optional[bytes] = None,
+    reference_text: Optional[str] = None,
     temperature: float = 0.8,
     top_p: float = 0.6,
     top_k: int = 30,
@@ -269,6 +346,10 @@ async def generate_audio_stream(
     """
     Stream audio chunks in real-time (20ms chunks).
     Yields raw PCM bytes as they're generated.
+    
+    CRITICAL: For zero-shot voice cloning, BOTH reference_audio AND reference_text
+    must be provided. The reference_text is the transcript of the reference audio,
+    used for cross-attention alignment.
     """
     from mossttsrealtime.streaming_mossttsrealtime import (
         MossTTSRealtimeStreamingSession,
@@ -281,6 +362,9 @@ async def generate_audio_stream(
         try:
             prompt_codes = encode_reference_audio(reference_audio, codec, device)
             prompt_tokens = prompt_codes.squeeze(1) if prompt_codes.ndim == 3 else prompt_codes
+            print(f"DEBUG: Encoded {prompt_tokens.shape} voice tokens", flush=True)
+            if reference_text:
+                print(f"DEBUG: Reference text for alignment: '{reference_text}'", flush=True)
         except Exception as e:
             print(f"Warning: Failed to encode reference audio: {e}")
             prompt_tokens = None
@@ -304,13 +388,16 @@ async def generate_audio_stream(
     # Set voice prompt
     if prompt_tokens is not None:
         session.set_voice_prompt_tokens(prompt_tokens)
+        print(f"DEBUG: Voice prompt set with {prompt_tokens.shape} tokens", flush=True)
     else:
         session.clear_voice_prompt()
     
     # Build turn input
     turn_input = processor.make_ensemble(prompt_tokens)
-    user_text = "Hello!"  # Default user text
-    user_prompt_text = f"<|im_end|>\n<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
+    
+    # NOTE: Do NOT prepend reference text to user text - it causes TTS to speak it!
+    # The reference_text is only used for acoustic alignment in the model's cross-attention
+    user_prompt_text = f"<|im_end|>\n<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
     user_prompt_tokens = tokenizer(user_prompt_text)["input_ids"]
     user_prompt = np.full(
         shape=(len(user_prompt_tokens), processor.channels + 1),
@@ -385,18 +472,22 @@ async def generate_audio_stream(
                         continue
                     
                     # Convert to PCM bytes and yield immediately
-                    wav_np = wav.detach().cpu().numpy().reshape(-1)
-                    pcm_bytes = (wav_np * 32767).astype(np.int16).tobytes()
-                    yield pcm_bytes
+                    # DEBUG: Check tensor stats
+                    # Use unified conversion helper
+                    pcm_bytes = tensor_to_pcm_bytes(wav)
+                    if pcm_bytes:
+                        yield pcm_bytes
                     chunk_index += 1
                 
                 if stopped:
                     break
             
             if session.inferencer.is_finished:
+                print(f"DEBUG: Generation finished early at chunk {i}, tokens processed: {i*text_chunk_size}/{len(text_tokens)}", flush=True)
                 break
         
         # Finalize
+        print(f"DEBUG: Calling end_text(), processed {chunk_index} audio chunks so far", flush=True)
         final_frames = session.end_text()
         for frame in final_frames:
             tokens = frame
@@ -410,16 +501,42 @@ async def generate_audio_stream(
             for wav in decoder.audio_chunks():
                 if wav.numel() == 0:
                     continue
-                wav_np = wav.detach().cpu().numpy().reshape(-1)
-                pcm_bytes = (wav_np * 32767).astype(np.int16).tobytes()
-                yield pcm_bytes
+                pcm_bytes = tensor_to_pcm_bytes(wav)
+                if pcm_bytes:
+                    yield pcm_bytes
+        
+        # CRITICAL: Drain remaining audio frames (this generates the bulk of the audio)
+        drain_count = 0
+        while not session.inferencer.is_finished:
+            drain_frames = session.drain(max_steps=1)
+            if not drain_frames:
+                break
+            drain_count += 1
+            for frame in drain_frames:
+                tokens = frame
+                if tokens.dim() == 3:
+                    tokens = tokens[0]
+                tokens, _ = sanitize_tokens(tokens)
+                if tokens.numel() == 0:
+                    continue
+                
+                decoder.push_tokens(tokens.detach())
+                for wav in decoder.audio_chunks():
+                    if wav.numel() == 0:
+                        continue
+                    pcm_bytes = tensor_to_pcm_bytes(wav)
+                    if pcm_bytes:
+                        yield pcm_bytes
+                        chunk_index += 1
+        
+        print(f"DEBUG: Drain generated {drain_count} extra frames, total chunks: {chunk_index}", flush=True)
         
         # Flush remaining audio
         final_chunk = decoder.flush()
         if final_chunk is not None and final_chunk.numel() > 0:
-            wav_np = final_chunk.detach().cpu().numpy().reshape(-1)
-            pcm_bytes = (wav_np * 32767).astype(np.int16).tobytes()
-            yield pcm_bytes
+            pcm_bytes = tensor_to_pcm_bytes(final_chunk)
+            if pcm_bytes:
+                yield pcm_bytes
 
 
 @app.post("/v1/audio/speech")
@@ -433,13 +550,34 @@ async def text_to_speech(request: TTSRequest):
     if inferencer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
+    # DEBUG: Print full request
+    print(f"DEBUG REQUEST: input='{request.input[:50]}...', voice='{request.voice}', extra_body={request.extra_body is not None}", flush=True)
+    
+    # --- THE PHANTOM PAD FIX ---
+    # MOSS-TTS requires minimum phonemes to prevent receptive field collapse.
+    # Short inputs (< 15 chars) cause the latent matrix to downsample to zero.
+    # Pad with ellipses which generate silent frames but keep the matrix stable.
+    original_input = request.input.strip()
+    if len(original_input) < 15:
+        request.input = original_input + " . . . . ."
+        print(f"DEBUG: Padded short input ({len(original_input)} chars) to: '{request.input}'", flush=True)
+    # ---------------------------
+    
     try:
-        # Extract reference audio from extra_body (zero-shot voice cloning)
+        # Extract reference audio and text from extra_body (zero-shot voice cloning)
         reference_audio = None
+        reference_text = None
         if request.extra_body:
             ref_audio_b64 = request.extra_body.get("reference_audio")
             if ref_audio_b64:
                 reference_audio = base64.b64decode(ref_audio_b64)
+                print(f"DEBUG: Voice cloning ENABLED - audio size: {len(reference_audio)} bytes", flush=True)
+            # CRITICAL: Get reference text for voice alignment
+            reference_text = request.extra_body.get("reference_text", "")
+            if reference_text:
+                print(f"DEBUG: Using reference text: '{reference_text[:60]}...'", flush=True)
+        else:
+            print(f"DEBUG: Voice cloning DISABLED - no extra_body", flush=True)
         
         # For non-streaming formats (wav, mp3), collect all audio first
         if request.response_format in ["wav", "mp3"]:
@@ -447,6 +585,7 @@ async def text_to_speech(request: TTSRequest):
             async for chunk in generate_audio_stream(
                 text=request.input,
                 reference_audio=reference_audio,
+                reference_text=reference_text,
                 temperature=request.temperature,
                 top_p=request.top_p,
                 top_k=request.top_k,
@@ -484,6 +623,7 @@ async def text_to_speech(request: TTSRequest):
                 async for chunk in generate_audio_stream(
                     text=request.input,
                     reference_audio=reference_audio,
+                    reference_text=reference_text,
                     temperature=request.temperature,
                     top_p=request.top_p,
                     top_k=request.top_k,
