@@ -345,34 +345,37 @@ pub async fn process_llm_tts(
 ) -> anyhow::Result<()> {
     *state.write().await = CallState::Thinking;
     
-    // Build messages with few-shot pattern forcing
-    // This locks the model into "dialogue mode" instead of "thinking mode"
+    // Layer 3: Prompt kill switch - /nothink + few-shot examples
     let messages = {
         let mut msgs = vec![
-            json!({
-                "role": "system",
-                "content": "You are Phil, having a casual phone conversation. Keep responses under 2 sentences. Be direct, friendly, and conversational."
-            }),
-            // Few-shot examples to force the pattern
-            json!({"role": "user", "content": "Hey, is anyone there?"}),
-            json!({"role": "assistant", "content": "Hey! Yeah, I'm here. What's up?"}),
+            json!({"role": "system", "content": "/nothink You are Phil on a phone call. Reply in 1-2 short sentences only."}),
+            // Few-shot examples force instant dialogue mode
+            json!({"role": "user", "content": "Hey, are you there?"}),
+            json!({"role": "assistant", "content": "Yeah, I'm here! What's up?"}),
             json!({"role": "user", "content": "What's the weather like?"}),
-            json!({"role": "assistant", "content": "Um... not sure, but I hope it's sunny! Why do you ask?"}),
+            json!({"role": "assistant", "content": "Hmm, not sure! Hope it's sunny though."}),
         ];
         // Add the actual conversation history
         msgs.extend(conversation.read().await.clone());
         msgs
     };
     
-    // Call Nemotron LLM with pattern forcing
+    // Call Nemotron LLM - 3-Layer Reasoning Kill Switch
     let llm_request = json!({
         "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
         "messages": messages,
         "stream": true,
-        "max_tokens": 80,
-        "temperature": 0.4,
-        "presence_penalty": 0.6,
-        "frequency_penalty": 0.3
+        "max_tokens": 40,
+        "temperature": 0.3,  // Low temp = less exploration, faster responses
+        "top_p": 0.9,
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.1,
+        // Layer 2: Mathematical kill switch - ban reasoning tokens
+        "bad_words": [
+            "<think>", "</think>", "<|reasoning|>", "<thought>", "</thought>",
+            "The user said", "The user asks", "I need to respond",
+            "We are starting", "I should say", "The question is"
+        ]
     });
     
     info!("Calling Nemotron LLM...");
