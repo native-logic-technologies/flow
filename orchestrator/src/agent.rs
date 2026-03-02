@@ -348,7 +348,7 @@ pub async fn process_llm_tts(
     // Layer 3: Prompt kill switch - /nothink + few-shot examples
     let messages = {
         let mut msgs = vec![
-            json!({"role": "system", "content": "/nothink You are Phil on a phone call. Reply in 1-2 short sentences only."}),
+            json!({"role": "system", "content": "You are Phil having a natural phone conversation. Speak conversationally without any formatting, headers, or markdown. Just talk naturally like a real person."}),
             // Few-shot examples force instant dialogue mode
             json!({"role": "user", "content": "Hey, are you there?"}),
             json!({"role": "assistant", "content": "Yeah, I'm here! What's up?"}),
@@ -365,7 +365,7 @@ pub async fn process_llm_tts(
         "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
         "messages": messages,
         "stream": true,
-        "max_tokens": 40,
+        "max_tokens": 200,
         "temperature": 0.3,  // Low temp = less exploration, faster responses
         "top_p": 0.9,
         "presence_penalty": 0.1,
