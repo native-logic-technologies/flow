@@ -535,6 +535,11 @@
             const source = audioContext.createMediaStreamSource(mediaStream);
             processor = audioContext.createScriptProcessor(256, 1, 1);
             
+            // Resampling buffer: accumulate 24kHz samples, output 8kHz
+            // Ratio: 24000 / 8000 = 3:1 (take every 3rd sample)
+            let resampleBuffer = [];
+            const RESAMPLE_RATIO = OUTPUT_SAMPLE_RATE / 8000; // 3.0
+            
             processor.onaudioprocess = (e) => {
                 if (!isConnected) return;
                 
@@ -550,15 +555,25 @@
                     }, i * 20);
                 });
                 
-                // Convert Float32 to Int16 PCM
-                const int16Data = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    int16Data[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                // Resample from 24kHz to 8kHz (take every 3rd sample)
+                for (let i = 0; i < inputData.length; i += RESAMPLE_RATIO) {
+                    resampleBuffer.push(inputData[Math.floor(i)]);
                 }
                 
-                // Send to server
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(int16Data.buffer);
+                // Send when we have enough samples (256 @ 8kHz = 32ms)
+                while (resampleBuffer.length >= 256) {
+                    const chunk = resampleBuffer.splice(0, 256);
+                    
+                    // Convert Float32 to Int16 PCM
+                    const int16Data = new Int16Array(256);
+                    for (let i = 0; i < 256; i++) {
+                        int16Data[i] = Math.max(-32768, Math.min(32767, chunk[i] * 32768));
+                    }
+                    
+                    // Send to server
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(int16Data.buffer);
+                    }
                 }
             };
             
