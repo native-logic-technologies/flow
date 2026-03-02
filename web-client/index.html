@@ -684,13 +684,17 @@
                 }
                 
                 // CRITICAL FIX: Limit buffer size to prevent drift
-                // If we're more than 1.5 seconds ahead, drop to maintain low latency
-                const MAX_BUFFER_AHEAD = 1.5; // seconds
-                const bufferAhead = nextPlayTime - audioContext.currentTime;
-                if (bufferAhead > MAX_BUFFER_AHEAD) {
-                    console.warn(`⚠️ Buffer too large (${bufferAhead.toFixed(2)}s), resetting to limit latency`);
-                    nextPlayTime = audioContext.currentTime + 0.1; // Small head start
+                // Check BEFORE scheduling this chunk
+                const MAX_BUFFER_AHEAD = 2.0; // seconds - allow slightly more for TTS generation time
+                const bufferBefore = nextPlayTime - audioContext.currentTime;
+                
+                if (bufferBefore > MAX_BUFFER_AHEAD) {
+                    console.warn(`⚠️ Buffer too large (${bufferBefore.toFixed(2)}s), dropping chunk to limit latency`);
+                    // Skip this chunk - don't schedule it
+                    return;
                 }
+                
+
                 
                 // Create audio buffer
                 const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);

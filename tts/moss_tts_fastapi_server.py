@@ -59,23 +59,31 @@ def tensor_to_pcm_bytes(chunk_tensor, apply_agc: bool = True) -> bytes:
         return b""
     
     # Automatic Gain Control (AGC): Boost quiet audio to target level
-    # MOSS-TTS generates very quiet audio for short text (< 15 chars after Phantom Pad)
-    # Target: 50% of full scale (0.5), only boost if below 20% (0.2)
-    TARGET_AMP = 0.60  # Target 60% of full scale
-    MIN_AMP_THRESHOLD = 0.30  # Only boost if below 30%
-    MAX_GAIN = 200.0  # Maximum gain factor (200x) - voice cloning needs extreme boost
+    # Strategy:
+    # - max_amp < 0.01: Startup noise, use gentle gain (10x max)
+    # - 0.01 <= max_amp < 0.30: Normal speech, full AGC
+    # - max_amp >= 0.30: Already loud, no boost needed
     
-    if apply_agc and max_amp >= NOISE_FLOOR and max_amp < 0.30:
-        gain = min(TARGET_AMP / max_amp, MAX_GAIN)
+    TARGET_AMP = 0.60  # Target 60% of full scale
+    NOISE_FLOOR = 0.01  # Below this is startup noise
+    MAX_GAIN = 50.0  # Cap gain to prevent distortion
+    STARTUP_GAIN = 10.0  # Gentler gain for startup
+    
+    if apply_agc and max_amp < 0.30:
+        if max_amp >= NOISE_FLOOR:
+            # Normal speech - full AGC
+            gain = min(TARGET_AMP / max_amp, MAX_GAIN)
+        else:
+            # Startup noise - gentle gain only
+            gain = STARTUP_GAIN
         audio_np = audio_np * gain
-        print(f"DEBUG: AGC applied - max_amp={max_amp:.4f}, gain={gain:.2f}x", flush=True)
-    elif max_amp < NOISE_FLOOR:
-        # Noise - don't amplify, just clamp
-        print(f"DEBUG: Noise skipped - max_amp={max_amp:.4f} (below noise floor)", flush=True)
+        print(f"DEBUG: AGC - max_amp={max_amp:.4f}, gain={gain:.2f}x", flush=True)
+    elif max_amp >= 0.30 and max_amp <= 1.0:
+        # Good level, no AGC needed
+        pass
     elif max_amp > 1.0:
-        # Hard limiter for audio that's too hot
+        # Hard limiter
         audio_np = np.clip(audio_np, -1.0, 1.0)
-        print(f"DEBUG: Limiter applied - max_amp was {max_amp:.4f}", flush=True)
     
     # Final clamp and convert to int16
     audio_np = np.clip(audio_np, -1.0, 1.0)
