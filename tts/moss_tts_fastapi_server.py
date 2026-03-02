@@ -355,7 +355,7 @@ async def generate_audio_stream(
         codec=codec,
         codec_sample_rate=CODEC_SAMPLE_RATE,
         codec_encode_kwargs={"chunk_duration": 8},
-        prefill_text_len=processor.delay_tokens_len,
+        prefill_text_len=6,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
@@ -388,10 +388,10 @@ async def generate_audio_stream(
     
     session.reset_turn(input_ids=turn_input, include_system_prompt=True, reset_cache=True)
     
-    # Create audio decoder - smaller chunks for lower latency
+    # Create audio decoder - use smallest chunks for lowest latency
     decoder = AudioStreamDecoder(
         codec,
-        chunk_frames=6,  # Reduced from 12 for faster first chunk
+        chunk_frames=3,  # Minimum for faster first chunk (example_llm_stream_to_tts uses 3)
         overlap_frames=0,
         decode_kwargs={"chunk_duration": -1},
         device=device,
