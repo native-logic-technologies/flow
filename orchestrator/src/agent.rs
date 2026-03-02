@@ -392,8 +392,8 @@ pub async fn process_llm_tts(
     
     *state.write().await = CallState::Speaking;
     
-    // Stream LLM tokens and collect full response for TTS
-    let mut response_buffer = String::new();
+    // Stream LLM tokens and send to TTS sentence-by-sentence for low latency
+    let mut sentence_buffer = String::new();
     let mut stream = response.bytes_stream();
     
     while let Some(chunk) = stream.next().await {
@@ -409,12 +409,11 @@ pub async fn process_llm_tts(
         for line in text.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
-                    // Generate TTS for the complete response
-                    let cleaned = strip_reasoning_tags(&response_buffer);
-                    // CRITICAL: Sanitize for TTS (remove emojis, markdown, etc.)
+                    // Flush any remaining text
+                    let cleaned = strip_reasoning_tags(&sentence_buffer);
                     let tts_ready = sanitize_for_tts(&cleaned);
-                    if !tts_ready.is_empty() && tts_ready.len() >= 10 {
-                        info!("TTS text ({} chars): {}", tts_ready.len(), tts_ready);
+                    if !tts_ready.is_empty() && tts_ready.len() >= 5 {
+                        info!("TTS final chunk ({} chars): {}", tts_ready.len(), tts_ready);
                         generate_tts(&tts_ready, config, http_client, egress_tx).await?;
                     }
                     break;
@@ -428,7 +427,31 @@ pub async fn process_llm_tts(
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
                     {
-                        response_buffer.push_str(content);
+                        sentence_buffer.push_str(content);
+                        
+                        // Check for sentence end - stream immediately for low latency
+                        if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') || content.ends_with('\n') {
+                            let cleaned = strip_reasoning_tags(&sentence_buffer);
+                            let tts_ready = sanitize_for_tts(&cleaned);
+                            
+                            if !tts_ready.is_empty() && tts_ready.len() >= 5 {
+                                info!("Streaming TTS sentence ({} chars): {}", tts_ready.len(), tts_ready);
+                                
+                                // Spawn TTS in parallel - don't wait for it to complete
+                                let tts_text = tts_ready.to_string();
+                                let tts_config = config.clone();
+                                let tts_http = http_client.clone();
+                                let tts_egress = egress_tx.map(|tx| tx.clone());
+                                
+                                tokio::spawn(async move {
+                                    if let Err(e) = generate_tts(&tts_text, &tts_config, &tts_http, tts_egress.as_ref()).await {
+                                        error!("TTS generation failed: {}", e);
+                                    }
+                                });
+                            }
+                            
+                            sentence_buffer.clear();
+                        }
                     }
                 }
             }

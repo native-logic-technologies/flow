@@ -388,10 +388,10 @@ async def generate_audio_stream(
     
     session.reset_turn(input_ids=turn_input, include_system_prompt=True, reset_cache=True)
     
-    # Create audio decoder
+    # Create audio decoder - smaller chunks for lower latency
     decoder = AudioStreamDecoder(
         codec,
-        chunk_frames=12,
+        chunk_frames=6,  # Reduced from 12 for faster first chunk
         overlap_frames=0,
         decode_kwargs={"chunk_duration": -1},
         device=device,
@@ -400,8 +400,8 @@ async def generate_audio_stream(
     # Tokenize text
     text_tokens = tokenizer.encode(text, add_special_tokens=False)
     
-    # Stream configuration
-    text_chunk_size = 12
+    # Stream configuration - smaller chunks for faster first audio
+    text_chunk_size = 6  # Reduced from 12
     codebook_size = int(getattr(codec, "codebook_size", 1024))
     audio_eos_token = int(getattr(inferencer, "audio_eos_token", 1026))
     
