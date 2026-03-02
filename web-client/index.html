@@ -277,6 +277,15 @@
         
         <div id="status" class="status disconnected">Disconnected</div>
         
+        <!-- Latency Stats Panel -->
+        <div class="latency-stats" id="latencyStats" style="background: #f0f0f0; border-radius: 8px; padding: 10px; margin-bottom: 15px; font-size: 12px; font-family: monospace;">
+            <div style="font-weight: bold; margin-bottom: 5px;">📊 Latency Stats</div>
+            <div id="ttftStat">TTFT: --</div>
+            <div id="ttsStat">TTS: --</div>
+            <div id="totalStat">Total E2E: --</div>
+            <div id="bufferStat">Buffer: --</div>
+        </div>
+        
         <!-- Voice Mode -->
         <div id="voice-tab" class="tab-content active">
             <div class="mode-indicator">Speak naturally, pause when done</div>
@@ -332,6 +341,16 @@
         let mediaStream = null;
         let processor = null;
         let isConnected = false;
+        
+        // Latency tracking
+        let messageStartTime = 0;
+        let firstTokenTime = 0;
+        let firstAudioTime = 0;
+        let latencyStats = {
+            ttft: [],
+            tts: [],
+            total: []
+        };
         
         // Audio scheduling for gapless playback
         let nextPlayTime = 0;
@@ -447,6 +466,12 @@
             const text = input.value.trim();
             
             if (!text) return;
+            
+            // Start latency tracking
+            messageStartTime = performance.now();
+            firstTokenTime = 0;
+            firstAudioTime = 0;
+            updateLatencyStats();
             
             // Add to conversation
             addMessage('user', text);
@@ -723,6 +748,26 @@
                 };
             } catch (err) {
                 console.error('❌ Error playing audio:', err);
+            }
+        }
+        
+        function updateLatencyStats() {
+            const now = performance.now();
+            
+            // Calculate averages from last 5 samples
+            const avg = (arr) => arr.length > 0 ? (arr.slice(-5).reduce((a,b) => a+b, 0) / Math.min(arr.length, 5)).toFixed(0) : '--';
+            
+            const ttft = firstTokenTime && messageStartTime ? (firstTokenTime - messageStartTime).toFixed(0) + 'ms' : '--';
+            const tts = firstAudioTime && messageStartTime ? (firstAudioTime - messageStartTime).toFixed(0) + 'ms' : '--';
+            const buffer = nextPlayTime && audioContext ? (nextPlayTime - audioContext.currentTime).toFixed(2) + 's' : '--';
+            
+            document.getElementById('ttftStat').textContent = `TTFT: ${ttft}`;
+            document.getElementById('ttsStat').textContent = `TTS: ${tts}`;
+            document.getElementById('bufferStat').textContent = `Buffer: ${buffer}`;
+            
+            if (firstAudioTime && messageStartTime) {
+                const total = (firstAudioTime - messageStartTime).toFixed(0);
+                document.getElementById('totalStat').textContent = `Total E2E: ${total}ms`;
             }
         }
         
