@@ -6,7 +6,7 @@ services:
       --bind 0.0.0.0
       --port 7880
       --node-ip 127.0.0.1
-      --keys "LIVEKIT_API_KEY: LIVEKIT_API_SECRET"
+      --keys "APIQp4vjmCjrWQ9: PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l"
     network_mode: host
     environment:
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-APIQp4vjmCjrWQ9}
