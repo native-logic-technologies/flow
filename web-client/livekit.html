@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveKit S2S Voice Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@1.15.0/dist/livekit-client.umd.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 {
+            color: #00d4ff;
+            text-align: center;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-family: monospace;
+        }
+        .status.connected {
+            background: #0f3d0f;
+            border: 1px solid #00ff00;
+        }
+        .status.disconnected {
+            background: #3d0f0f;
+            border: 1px solid #ff0000;
+        }
+        .status.connecting {
+            background: #3d3d0f;
+            border: 1px solid #ffff00;
+        }
+        button {
+            background: #00d4ff;
+            color: #000;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 10px 5px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #00a8cc;
+        }
+        button:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+        #log {
+            background: #0f0f23;
+            padding: 15px;
+            border-radius: 8px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #333;
+            margin-top: 20px;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 0;
+        }
+        .log-entry.info { color: #00d4ff; }
+        .log-entry.success { color: #00ff00; }
+        .log-entry.error { color: #ff4444; }
+        .log-entry.warning { color: #ffaa00; }
+        .controls {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .indicator.recording {
+            background: #ff0000;
+            animation: pulse 1s infinite;
+        }
+        .indicator.speaking {
+            background: #00ff00;
+        }
+        .indicator.idle {
+            background: #888;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .config {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .config label {
+            display: block;
+            margin: 10px 0;
+        }
+        .config input {
+            width: 100%;
+            padding: 8px;
+            background: #0f0f23;
+            border: 1px solid #333;
+            color: #fff;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎙️ LiveKit S2S Voice Test</h1>
+    <p style="text-align: center; color: #888;">
+        Test the Comma-Level Chunking voice pipeline
+    </p>
+
+    <div class="config">
+        <label>
+            LiveKit URL:
+            <input type="text" id="url" value="ws://localhost:7880">
+        </label>
+        <label>
+            Room Name:
+            <input type="text" id="room" value="dgx-spark-room">
+        </label>
+        <label>
+            Token (optional - will generate):
+            <input type="text" id="token" placeholder="Leave empty to auto-generate">
+        </label>
+    </div>
+
+    <div id="status" class="status disconnected">
+        <span class="indicator idle"></span>
+        <span id="statusText">Disconnected</span>
+    </div>
+
+    <div class="controls">
+        <button id="connectBtn" onclick="connect()">🔗 Connect</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>❌ Disconnect</button>
+        <button id="muteBtn" onclick="toggleMute()" disabled>🎤 Mute</button>
+    </div>
+
+    <div style="text-align: center; color: #888; font-size: 14px;">
+        <p>Status: <span id="pipelineStatus">Waiting for connection...</span></p>
+        <p style="font-size: 12px;">
+            Config: FLUSH_SIZE=25, FLUSH_TRIGGERS=,,.,!,?,
+        </p>
+    </div>
+
+    <div id="log"></div>
+
+    <script>
+        const logEl = document.getElementById('log');
+        const statusEl = document.getElementById('status');
+        const statusTextEl = document.getElementById('statusText');
+        const pipelineStatusEl = document.getElementById('pipelineStatus');
+        
+        let room = null;
+        let localAudioTrack = null;
+        let isMuted = false;
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateStatus(status, text) {
+            statusEl.className = `status ${status}`;
+            statusTextEl.textContent = text;
+            const indicator = statusEl.querySelector('.indicator');
+            indicator.className = `indicator ${status === 'connected' ? 'speaking' : status === 'connecting' ? 'recording' : 'idle'}`;
+        }
+
+        function generateToken(roomName) {
+            // Simple JWT generation for testing
+            // In production, use proper JWT signing
+            const apiKey = "APIQp4vjmCjrWQ9";
+            const apiSecret = "PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l";
+            
+            const header = btoa(JSON.stringify({alg: "HS256", typ: "JWT"}));
+            const now = Math.floor(Date.now() / 1000);
+            const payload = btoa(JSON.stringify({
+                exp: now + 3600,
+                iss: apiKey,
+                sub: "web-test-user",
+                video: {
+                    roomJoin: true,
+                    room: roomName,
+                    canPublish: true,
+                    canSubscribe: true,
+                    canPublishData: true
+                }
+            }));
+            
+            // Note: This is NOT a valid JWT signature - for demo only
+            // Real implementation needs server-side token generation
+            return `${header}.${payload}.demo`;
+        }
+
+        async function connect() {
+            const url = document.getElementById('url').value;
+            const roomName = document.getElementById('room').value;
+            let token = document.getElementById('token').value;
+            
+            if (!token) {
+                token = generateToken(roomName);
+                log('Generated demo token (for testing only)', 'warning');
+            }
+
+            updateStatus('connecting', 'Connecting...');
+            log(`Connecting to ${url}...`);
+
+            try {
+                room = new LivekitClient.Room({
+                    adaptiveStream: true,
+                    dynacast: true,
+                    audioCaptureDefaults: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    }
+                });
+
+                room.on('connected', () => {
+                    updateStatus('connected', 'Connected');
+                    log('Connected to room!', 'success');
+                    pipelineStatusEl.textContent = 'Connected - Speak to test';
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('muteBtn').disabled = false;
+                });
+
+                room.on('disconnected', (reason) => {
+                    updateStatus('disconnected', 'Disconnected');
+                    log(`Disconnected: ${reason}`, 'error');
+                    pipelineStatusEl.textContent = 'Disconnected';
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('muteBtn').disabled = true;
+                });
+
+                room.on('trackSubscribed', (track, publication, participant) => {
+                    log(`Subscribed to ${track.kind} from ${participant.identity}`);
+                    if (track.kind === 'audio') {
+                        const element = track.attach();
+                        element.play();
+                        log('Playing agent audio', 'success');
+                        pipelineStatusEl.textContent = 'Agent speaking...';
+                    }
+                });
+
+                room.on('trackUnsubscribed', (track) => {
+                    log(`Unsubscribed from ${track.kind}`);
+                    track.detach();
+                });
+
+                room.on('participantConnected', (participant) => {
+                    log(`Participant connected: ${participant.identity}`, 'success');
+                });
+
+                room.on('participantDisconnected', (participant) => {
+                    log(`Participant disconnected: ${participant.identity}`, 'warning');
+                });
+
+                // Connect
+                await room.connect(url, token);
+
+                // Enable microphone
+                await room.localParticipant.enableMicrophone();
+                log('Microphone enabled', 'success');
+
+                // Publish audio track
+                const audioTracks = await LivekitClient.createLocalAudioTracks({
+                    noiseSuppression: true,
+                    echoCancellation: true,
+                });
+                
+                for (const track of audioTracks) {
+                    await room.localParticipant.publishTrack(track);
+                    localAudioTrack = track;
+                    log('Audio track published', 'success');
+                }
+
+            } catch (error) {
+                updateStatus('disconnected', 'Connection failed');
+                log(`Connection error: ${error.message}`, 'error');
+                console.error(error);
+            }
+        }
+
+        async function disconnect() {
+            if (room) {
+                await room.disconnect();
+                room = null;
+            }
+            log('Disconnected by user');
+        }
+
+        async function toggleMute() {
+            if (!room) return;
+            
+            isMuted = !isMuted;
+            await room.localParticipant.setMicrophoneEnabled(!isMuted);
+            
+            const btn = document.getElementById('muteBtn');
+            btn.textContent = isMuted ? '🎤 Unmute' : '🎤 Mute';
+            log(isMuted ? 'Muted' : 'Unmuted');
+        }
+
+        // Auto-log startup
+        log('LiveKit S2S Voice Test ready');
+        log('Click "Connect" to join the room');
+        log('Configuration: Comma-Level Chunking (25 chars)');
+    </script>
+</body>
+</html>

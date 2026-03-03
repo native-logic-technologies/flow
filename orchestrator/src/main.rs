@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/web-client", get(web_client_handler))
         .route("/debug", get(debug_handler))
+        .route("/livekit", get(livekit_handler))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -93,6 +94,10 @@ async fn web_client_handler() -> Html<&'static str> {
 
 async fn debug_handler() -> Html<&'static str> {
     Html(include_str!("../../web-client/debug.html"))
+}
+
+async fn livekit_handler() -> Html<&'static str> {
+    Html(include_str!("../../web-client/livekit.html"))
 }
 
 async fn health_handler(State(_state): State<AppState>) -> String {

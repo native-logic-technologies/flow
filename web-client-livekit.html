@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveKit S2S - Production Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@1.15.0/dist/livekit-client.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+            text-align: center;
+        }
+        h1 {
+            color: #00d4ff;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+        .subtitle {
+            color: #888;
+            margin-bottom: 40px;
+        }
+        .status {
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+            background: #1a1a2e;
+            border: 1px solid #333;
+        }
+        .status.connected {
+            background: #0f3d0f;
+            border-color: #00ff00;
+        }
+        .status.error {
+            background: #3d0f0f;
+            border-color: #ff4444;
+        }
+        .orb {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 30% 30%, #00d4ff, #0066aa);
+            margin: 40px auto;
+            position: relative;
+            box-shadow: 0 0 60px rgba(0, 212, 255, 0.3);
+            transition: all 0.3s ease;
+        }
+        .orb.speaking {
+            animation: pulse 1s infinite;
+            background: radial-gradient(circle at 30% 30%, #00ff88, #00aa44);
+            box-shadow: 0 0 80px rgba(0, 255, 136, 0.5);
+        }
+        .orb.thinking {
+            animation: pulse 0.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        button {
+            background: #00d4ff;
+            color: #000;
+            border: none;
+            padding: 16px 40px;
+            font-size: 18px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: 600;
+            margin: 10px;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #00a8cc;
+            transform: scale(1.02);
+        }
+        button:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+        .config {
+            background: #16161f;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 30px;
+            font-size: 12px;
+            color: #666;
+        }
+        .log {
+            text-align: left;
+            background: #0f0f16;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            color: #888;
+        }
+        .log-entry { margin: 4px 0; }
+        .log-entry.info { color: #00d4ff; }
+        .log-entry.success { color: #00ff88; }
+        .log-entry.error { color: #ff4444; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ DGX Spark Voice AI</h1>
+        <p class="subtitle">Production S2S with Comma-Level Chunking</p>
+        
+        <div id="status" class="status">
+            <p>Click "Connect" to start conversation</p>
+            <p style="font-size: 12px; color: #666; margin-top: 10px;">
+                Server: wss://cleans2s.voiceflow.cloud
+            </p>
+        </div>
+
+        <div id="orb" class="orb"></div>
+
+        <div id="controls">
+            <button id="connectBtn" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+
+        <div class="config">
+            <p><strong>Configuration:</strong></p>
+            <p>Room: dgx-spark-room | FLUSH_SIZE: 25 | prefill: 3 | Target: &lt;500ms</p>
+        </div>
+
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        const logEl = document.getElementById('log');
+        const statusEl = document.getElementById('status');
+        const orbEl = document.getElementById('orb');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        
+        let room = null;
+        
+        function log(msg, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateStatus(html, type = '') {
+            statusEl.innerHTML = html;
+            statusEl.className = 'status ' + type;
+        }
+
+        function generateToken(participantName) {
+            // Demo token generation - in production, use server-side
+            const apiKey = "APIQp4vjmCjrWQ9";
+            const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+            const now = Math.floor(Date.now() / 1000);
+            const payload = btoa(JSON.stringify({
+                exp: now + 3600,
+                iss: apiKey,
+                sub: participantName,
+                video: {
+                    roomJoin: true,
+                    room: "dgx-spark-room",
+                    canPublish: true,
+                    canSubscribe: true,
+                    canPublishData: true
+                }
+            }));
+            return `${header}.${payload}.demo`;
+        }
+
+        async function connect() {
+            const url = "wss://cleans2s.voiceflow.cloud";
+            const participantName = "user-" + Math.floor(Math.random() * 10000);
+            const token = generateToken(participantName);
+            
+            log("Connecting to " + url + "...");
+            updateStatus("<p>Connecting...</p>", "");
+            connectBtn.disabled = true;
+            
+            try {
+                room = new LivekitClient.Room({
+                    adaptiveStream: true,
+                    dynacast: true,
+                    audioCaptureDefaults: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    }
+                });
+
+                room.on('connected', () => {
+                    log("Connected! Speak to start conversation.", "success");
+                    updateStatus("<p>🟢 Connected - Speak to talk with Phil</p>", "connected");
+                    disconnectBtn.disabled = false;
+                    orbEl.classList.add('thinking');
+                });
+
+                room.on('disconnected', (reason) => {
+                    log("Disconnected: " + reason, "error");
+                    updateStatus("<p>Disconnected</p>");
+                    orbEl.classList.remove('speaking', 'thinking');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                });
+
+                room.on('trackSubscribed', (track, publication, participant) => {
+                    log("Subscribed to " + track.kind + " from " + participant.identity, "success");
+                    if (track.kind === 'audio') {
+                        const element = track.attach();
+                        element.play();
+                        orbEl.classList.add('speaking');
+                        orbEl.classList.remove('thinking');
+                    }
+                });
+
+                room.on('trackUnsubscribed', (track) => {
+                    track.detach();
+                    orbEl.classList.remove('speaking');
+                    orbEl.classList.add('thinking');
+                });
+
+                room.on('participantConnected', (participant) => {
+                    log("Agent joined: " + participant.identity, "success");
+                });
+
+                // Connect
+                await room.connect(url, token);
+                
+                // Enable microphone
+                await room.localParticipant.enableMicrophone();
+                
+                // Publish audio track
+                const audioTracks = await LivekitClient.createLocalAudioTracks({
+                    noiseSuppression: true,
+                    echoCancellation: true,
+                });
+                
+                for (const track of audioTracks) {
+                    await room.localParticipant.publishTrack(track);
+                }
+                
+            } catch (err) {
+                log("Connection failed: " + err.message, "error");
+                updateStatus("<p>Connection failed. Check console.</p>", "error");
+                connectBtn.disabled = false;
+                console.error(err);
+            }
+        }
+
+        async function disconnect() {
+            if (room) {
+                await room.disconnect();
+                room = null;
+            }
+            log("Disconnected by user");
+        }
+
+        // Initial log
+        log("Ready to connect to cleans2s.voiceflow.cloud");
+        log("Configuration: Comma-Level Chunking (25 chars)");
+    </script>
+</body>
+</html>
