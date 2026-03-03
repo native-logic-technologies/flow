@@ -1,0 +1,20 @@
+services:
+  livekit-sip:
+    image: livekit/sip-server:latest
+    network_mode: host
+    environment:
+      - LIVEKIT_WS_URL=ws://localhost:7880
+      - LIVEKIT_API_KEY=APIQp4vjmCjrWQ9
+      - LIVEKIT_API_SECRET=PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l
+      - SIP_BIND_HOST=0.0.0.0
+      - SIP_BIND_PORT=5060
+      - SIP_EXTERNAL_IP=194.72.78.36
+      - RTP_PORT_START=10000
+      - RTP_PORT_END=20000
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-20000:10000-20000/udp"
+    restart: unless-stopped
+    volumes:
+      - ./sip-config.yml:/etc/livekit/sip-config.yml:ro

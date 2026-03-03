@@ -9,6 +9,8 @@ use axum::{
     response::{Response, Html},
 };
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, error};
 use tower_http::cors::CorsLayer;
 use futures_util::{SinkExt, StreamExt};
@@ -198,10 +200,11 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     });
     
     // Handle ingress
-    while let Some(msg) = receiver.next().await {
-        match msg {
+    while let Some(result) = receiver.next().await {
+        match result {
             Ok(Message::Binary(data)) => {
                 if ingress_tx.send(bytes::Bytes::from(data)).await.is_err() {
+                    info!("Ingress channel closed, breaking receive loop");
                     break;
                 }
             }
@@ -213,11 +216,16 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         }
                         Some("interrupt") => {
                             info!("Client requested interrupt");
+                            // Cancel any active TTS
+                            agent.tts_cancel.lock().await.cancel();
                         }
                         Some("text") => {
                             // Text message from client (text mode)
                             if let Some(msg_text) = control.get("text").and_then(|t| t.as_str()) {
                                 info!("Received text message: {}", msg_text);
+                                
+                                // Reset cancellation token for new turn
+                                *agent.tts_cancel.lock().await = CancellationToken::new();
                                 
                                 // Add to conversation
                                 agent.conversation.write().await.push(serde_json::json!({
@@ -252,11 +260,12 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                 }
             }
             Ok(Message::Close(_)) => {
-                info!("Client disconnected");
+                info!("Client disconnected normally");
                 break;
             }
             Err(e) => {
-                error!("WebSocket error: {}", e);
+                // Graceful disconnect handling - don't panic, just log and break
+                info!("WebSocket error (client likely disconnected): {}", e);
                 break;
             }
             _ => {}

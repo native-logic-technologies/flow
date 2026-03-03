@@ -1,0 +1,31 @@
+[Unit]
+Description=LiveKit S2S Orchestrator (Token-Level Streaming)
+After=network.target nemotron-9b-vllm.service voxtral-asr.service moss-tts-server.service
+Wants=nemotron-9b-vllm.service voxtral-asr.service moss-tts-server.service
+
+[Service]
+Type=simple
+User=phil
+Group=phil
+
+WorkingDirectory=/home/phil/telephony-stack/livekit_orchestrator
+
+Environment="LLM_URL=http://localhost:8000"
+Environment="ASR_URL=http://localhost:8001"
+Environment="TTS_URL=ws://localhost:8002"
+Environment="LIVEKIT_WS_URL=ws://localhost:7880"
+Environment="ROOM_NAME=dgx-spark-room"
+Environment="RUST_LOG=info"
+Environment="LIVEKIT_API_KEY=APIQp4vjmCjrWQ9"
+Environment="LIVEKIT_API_SECRET=PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l"
+
+ExecStart=/home/phil/telephony-stack/livekit_orchestrator/target/release/livekit_orchestrator
+
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

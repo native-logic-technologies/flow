@@ -35,7 +35,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.expanduser("~/telephony-stack/moss-tts-src/moss_tts_realtime"))
 sys.path.insert(0, os.path.expanduser("~/telephony-stack/moss-tts-src"))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -72,8 +72,98 @@ codec = None
 processor = None
 inferencer = None
 
+# CACHED speaker embedding for zero-shot voice cloning
+# Pre-computed on startup to avoid ~600ms delay per request
+CACHED_VOICE_PROMPT_TOKENS = None
+
+# Getter function to avoid module import issues
+def get_voice_cache():
+    """Get cached voice prompt tokens in correct shape [Time, Quantizers]"""
+    return CACHED_VOICE_PROMPT_TOKENS
+
+
+CACHED_VOICE_REFERENCE_TEXT = "I really didn't expect the weather to change so quickly."
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 CODEC_SAMPLE_RATE = 24000
+
+
+def load_cached_voice_embedding():
+    """Pre-compute and cache the speaker embedding on startup.
+    
+    This saves ~600ms per TTS request by avoiding re-encoding
+    the reference audio every time.
+    """
+    global CACHED_VOICE_PROMPT_TOKENS
+    
+    # Path to reference audio (Phil's 7-second conversational voice sample)
+    # Using the 16kHz version which is optimal for MOSS-TTS
+    ref_audio_path = os.path.expanduser("~/telephony-stack/tts/phil-conversational-16k.wav")
+    
+    if not os.path.exists(ref_audio_path):
+        print(f"WARNING: Reference audio not found at {ref_audio_path}")
+        print("Voice cloning will use default voice (slower)")
+        return
+    
+    try:
+        print(f"Pre-computing speaker embedding from {ref_audio_path}...")
+        
+        # Read audio file
+        import soundfile as sf
+        audio_np, sample_rate = sf.read(ref_audio_path, dtype='float32')
+        
+        # Convert to tensor
+        wav_tensor = torch.from_numpy(audio_np).float()
+        if wav_tensor.ndim == 1:
+            wav_tensor = wav_tensor.unsqueeze(0)
+        elif wav_tensor.ndim == 2:
+            wav_tensor = wav_tensor.t()
+            wav_tensor = torch.mean(wav_tensor, dim=0, keepdim=True)
+        
+        # Resample to 24kHz if needed
+        if sample_rate != CODEC_SAMPLE_RATE:
+            import torchaudio.functional as F
+            wav_tensor = F.resample(wav_tensor, sample_rate, CODEC_SAMPLE_RATE)
+        
+        # Add batch dimension and move to device
+        waveform = wav_tensor.unsqueeze(0).to(device)
+        
+        # Encode to tokens
+        with torch.no_grad():
+            encode_result = codec.encode(waveform, chunk_duration=8)
+        
+        # Extract codes
+        if isinstance(encode_result, dict):
+            codes = encode_result["audio_codes"]
+        elif hasattr(encode_result, "audio_codes"):
+            codes = encode_result.audio_codes
+        else:
+            codes = encode_result
+            
+        if isinstance(codes, np.ndarray):
+            codes = torch.from_numpy(codes)
+        
+        # Reshape to expected format
+        if codes.dim() == 3:
+            if codes.shape[1] == 1:
+                codes = codes[:, 0, :]
+            elif codes.shape[0] == 1:
+                codes = codes[0]
+        
+                # Transpose to [Time, Quantizers] format for MOSS-TTS
+        # Original shape is [Quantizers, Time], we need [Time, Quantizers]
+        codes_np = codes.detach().cpu().numpy()
+        if codes_np.shape[0] < codes_np.shape[1]:  # If [Quantizers, Time]
+            codes_np = codes_np.T  # Transpose to [Time, Quantizers]
+        CACHED_VOICE_PROMPT_TOKENS = codes_np
+        
+        print(f"✓ Speaker embedding cached and TRANSPOSED: {CACHED_VOICE_PROMPT_TOKENS.shape}", flush=True)
+        print(f"  Voice cloning will be ~600ms faster per request!")
+        
+    except Exception as e:
+        print(f"ERROR: Failed to cache speaker embedding: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 class TTSRequest(BaseModel):
@@ -149,6 +239,10 @@ def load_models():
     global inferencer
     inferencer = StreamingMossTTSInference(model, tokenizer, max_length=2048)
     inferencer.reset_generation_state(keep_cache=False)
+    
+    # Pre-compute and cache speaker embedding for voice cloning
+    # This saves ~600ms per TTS request
+    load_cached_voice_embedding()
     
     print("✓ MOSS-TTS-Realtime ready!")
     print(f"  - Sample rate: {CODEC_SAMPLE_RATE} Hz")
@@ -645,6 +739,42 @@ async def chat_completions():
             "finish_reason": "stop"
         }]
     }
+
+
+# ============================================================================
+# WebSocket Streaming Endpoint - For <500ms Latency
+# ============================================================================
+
+@app.websocket("/ws/tts")
+async def websocket_tts_stream(websocket: WebSocket):
+    """
+    Thread-safe WebSocket endpoint for streaming TTS.
+    Runs PyTorch generation in a separate thread to avoid blocking the async loop.
+    
+    Protocol:
+    1. Client connects and sends: {"type": "init", "voice": "default"} (optional)
+    2. Client streams text tokens as they arrive from LLM: "Hi", " there", "!"
+    3. Client sends: {"type": "end"} to finish
+    4. Server streams audio chunks back immediately via binary messages
+    
+    This enables <500ms latency by overlapping LLM generation with TTS synthesis.
+    """
+    # Use new streaming handler for true token-level streaming
+    from moss_tts_streaming_handler import handle_streaming_tts
+    
+    model_components = {
+        'inferencer': inferencer,
+        'processor': processor,
+        'codec': codec,
+        'tokenizer': tokenizer,
+        'device': device,
+        'cached_voice_tokens': CACHED_VOICE_PROMPT_TOKENS  # Pass cached voice directly!
+    }
+    
+    await handle_streaming_tts(websocket, model_components)
+
+
+
 
 
 if __name__ == "__main__":

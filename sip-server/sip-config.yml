@@ -1,0 +1,48 @@
+# LiveKit SIP Configuration
+# This defines how calls are routed from PSTN to LiveKit Rooms
+
+sip:
+  # Bind to all interfaces
+  bind_host: 0.0.0.0
+  bind_port: 5060
+  
+  # External IP for SIP signaling (your DGX Spark public IP)
+  external_ip: 194.72.78.36
+  
+  # RTP port range for media
+  rtp_port_start: 10000
+  rtp_port_end: 20000
+
+# LiveKit connection
+livekit:
+  ws_url: ws://localhost:7880
+  api_key: APIQp4vjmCjrWQ9
+  api_secret: PcRKzAOUY0zqSM2j2a8VQpFLdMQz3qQD6GwQvOJZf4l
+
+# Inbound Trunk Configuration
+# When someone calls your Twilio number, they get routed here
+inbound_trunks:
+  - name: "phil-main-trunk"
+    # Match any phone number (or specify your Twilio number)
+    numbers: ["*"]
+    # The room to join (can be dynamic per-call)
+    room_template: "sip-{phone_number}"
+    # The agent identity in the room
+    participant_identity: "caller"
+    # Play a greeting immediately
+    greeting_message: ""
+    # Media settings - match your MOSS-TTS output
+    audio_codec: "opus"
+    sample_rate: 24000
+
+# Outbound Trunk Configuration  
+# For the AI to make outbound calls
+outbound_trunks:
+  - name: "twilio-outbound"
+    # Your Twilio SIP trunk credentials would go here
+    host: "egress.twilio.com"
+    port: 5060
+    transport: "udp"
+    # Auth details (add your Twilio credentials)
+    username: ""
+    password: ""

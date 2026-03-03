@@ -1,10 +1,20 @@
 /// Audio processing module for VAD and optional denoising
 use std::collections::VecDeque;
 
+/// VAD results for streaming audio processing
 pub enum VadResult {
+    /// Speech detected (contains audio frame)
     Speech(Vec<f32>),
+    /// Silence detected
     Silence,
+    /// No decision yet
     None,
+    /// Speech start event
+    SpeechStart,
+    /// Speech end with transcript (from ASR)
+    SpeechEnd { transcript: String },
+    /// Partial transcript during speech
+    PartialTranscript(String),
 }
 
 /// Simple energy-based VAD (Silero VAD can be added as feature)
@@ -15,12 +25,18 @@ pub struct AudioProcessor {
     energy_threshold: f32,
     speech_frames: u32,
     silence_frames: u32,
+    is_speaking: bool,
+    /// Frame duration in ms
+    frame_duration_ms: u32,
 }
 
 impl AudioProcessor {
     pub fn new(sample_rate: u32) -> Self {
-        // 30ms frame size
-        let frame_size = (sample_rate as usize * 30) / 1000;
+        Self::with_frame_duration(sample_rate, 30) // Default 30ms frames
+    }
+    
+    pub fn with_frame_duration(sample_rate: u32, frame_duration_ms: u32) -> Self {
+        let frame_size = (sample_rate as usize * frame_duration_ms as usize) / 1000;
         
         Self {
             sample_rate,
@@ -29,6 +45,8 @@ impl AudioProcessor {
             energy_threshold: 0.01, // Adjust based on noise floor
             speech_frames: 0,
             silence_frames: 0,
+            is_speaking: false,
+            frame_duration_ms,
         }
     }
 
@@ -51,22 +69,36 @@ impl AudioProcessor {
                 self.speech_frames += 1;
                 self.silence_frames = 0;
                 
-                // Require 3 consecutive speech frames to trigger
-                if self.speech_frames >= 3 {
+                // Require 3 consecutive speech frames to trigger start
+                if self.speech_frames >= 3 && !self.is_speaking {
+                    self.is_speaking = true;
+                    result = VadResult::SpeechStart;
+                } else if self.is_speaking {
                     result = VadResult::Speech(frame);
                 }
             } else {
                 self.silence_frames += 1;
                 
                 // Require 10 consecutive silence frames to trigger end
-                if self.silence_frames >= 10 {
+                if self.silence_frames >= 10 && self.is_speaking {
+                    self.is_speaking = false;
                     self.speech_frames = 0;
+                    result = VadResult::SpeechEnd { transcript: String::new() };
+                } else if self.silence_frames >= 10 {
                     result = VadResult::Silence;
                 }
             }
         }
         
         result
+    }
+    
+    /// Process a frame and return VAD result (async wrapper for compatibility)
+    pub async fn process_frame(&mut self, samples: &[f32]) -> Option<VadResult> {
+        match self.process_chunk(samples) {
+            VadResult::None => None,
+            other => Some(other),
+        }
     }
 
     /// Set custom energy threshold for different environments

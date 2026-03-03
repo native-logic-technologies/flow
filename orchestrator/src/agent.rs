@@ -333,9 +333,12 @@ impl TelephonyAgent {
     }
 }
 
-/// Process LLM -> TTS pipeline
+/// Process LLM -> TTS pipeline with MICRO-CHUNKING for <500ms latency
+/// 
+/// This function streams LLM tokens to TTS incrementally instead of buffering
+/// the full response. Total latency = max(LLM TTFT, TTS TTFT) ~ 300-450ms
 #[instrument(skip(config, http_client, conversation, state, cancel_token, egress_tx))]
-pub async fn process_llm_tts(
+pub async fn process_llm_tts_micro(
     config: &AgentConfig,
     http_client: &Client,
     conversation: &Arc<RwLock<Vec<serde_json::Value>>>,
@@ -343,33 +346,41 @@ pub async fn process_llm_tts(
     cancel_token: &Arc<Mutex<CancellationToken>>,
     egress_tx: Option<&mpsc::Sender<Bytes>>,
 ) -> anyhow::Result<()> {
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message;
+    
     *state.write().await = CallState::Thinking;
     
-    // Layer 3: Prompt kill switch - /nothink + few-shot examples
+    // Layer 3: Prompt kill switch with BACKCHANNELING
     let messages = {
         let mut msgs = vec![
-            json!({"role": "system", "content": "You are Phil having a natural phone conversation. Speak conversationally without any formatting, headers, or markdown. Just talk naturally like a real person."}),
-            // Few-shot examples force instant dialogue mode
+            json!({"role": "system", "content": "You are Phil having a natural phone conversation. Use occasional filler words like 'um', 'ahh', 'hmm' and backchanneling ('I see', 'right', 'got it') for natural speech. Keep responses SHORT (1-2 sentences). Speak conversationally without formatting."}),
+            // Few-shot examples with natural fillers and backchanneling
             json!({"role": "user", "content": "Hey, are you there?"}),
             json!({"role": "assistant", "content": "Yeah, I'm here! What's up?"}),
             json!({"role": "user", "content": "What's the weather like?"}),
             json!({"role": "assistant", "content": "Hmm, not sure! Hope it's sunny though."}),
+            json!({"role": "user", "content": "I'm feeling stressed about work"}),
+            json!({"role": "assistant", "content": "Ahh, I hear you. Work can be tough sometimes, right?"}),
         ];
         // Add the actual conversation history
         msgs.extend(conversation.read().await.clone());
         msgs
     };
     
-    // Call Nemotron LLM - 3-Layer Reasoning Kill Switch
+    // Call Nemotron LLM - 3-Layer Reasoning Kill Switch + SPEED OPTIMIZATION
     let llm_request = json!({
         "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
         "messages": messages,
         "stream": true,
-        "max_tokens": 200,
-        "temperature": 0.3,  // Low temp = less exploration, faster responses
-        "top_p": 0.9,
-        "presence_penalty": 0.1,
-        "frequency_penalty": 0.1,
+        "max_tokens": 100,  // Shorter responses for faster generation
+        "temperature": 0.7,  // Slightly higher for natural variation including fillers
+        "top_p": 0.95,
+        "presence_penalty": 0.2,
+        "frequency_penalty": 0.2,
+        // Speed optimizations
+        "min_tokens": 5,
+        "skip_special_tokens": false,
         // Layer 2: Mathematical kill switch - ban reasoning tokens
         "bad_words": [
             "<think>", "</think>", "<|reasoning|>", "<thought>", "</thought>",
@@ -378,7 +389,9 @@ pub async fn process_llm_tts(
         ]
     });
     
-    info!("Calling Nemotron LLM...");
+    info!("Calling Nemotron LLM (micro-chunking mode)...");
+    
+    // Start LLM request
     let response = http_client
         .post(&config.llm_url)
         .json(&llm_request)
@@ -392,8 +405,233 @@ pub async fn process_llm_tts(
     
     *state.write().await = CallState::Speaking;
     
-    // Stream LLM tokens and send to TTS sentence-by-sentence for low latency
+    // STEP 1: Open TTS WebSocket IMMEDIATELY (before reading LLM)
+    let tts_ws_url = config.tts_url.replace("http://", "ws://")
+        .replace("https://", "wss://")
+        .replace("/v1/audio/speech", "/ws/tts");
+    
+    info!("Connecting to TTS WebSocket at {} (micro-chunking)", tts_ws_url);
+    let (mut tts_ws, _) = connect_async(&tts_ws_url).await?;
+    
+    // Send init to TTS
+    let init_msg = json!({
+        "type": "init",
+        "voice": config.voice.as_deref().unwrap_or("default")
+    });
+    tts_ws.send(Message::Text(init_msg.to_string())).await?;
+    
+    // Wait for TTS ready
+    let ready_msg = tts_ws.next().await.ok_or_else(|| anyhow::anyhow!("TTS WebSocket closed before ready"))??;
+    if let Message::Text(text) = ready_msg {
+        let status: serde_json::Value = serde_json::from_str(&text)?;
+        if status.get("status").and_then(|s| s.as_str()) != Some("ready") {
+            anyhow::bail!("TTS WebSocket did not become ready: {}", text);
+        }
+    }
+    
+    info!("TTS WebSocket ready - starting micro-chunking stream");
+    
+    // STEP 2: Stream LLM tokens to TTS as they arrive
+    let mut llm_stream = response.bytes_stream();
+    let mut token_buffer = String::new();
+    let mut full_response = String::new();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let mut sse_buffer = String::new();
+    
+    while let Some(chunk_result) = llm_stream.next().await {
+        if cancel_token.lock().await.is_cancelled() {
+            info!("TTS cancelled (barge-in)");
+            let _ = tts_ws.send(Message::Text(json!({"type": "end"}).to_string())).await;
+            return Ok(());
+        }
+        
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Error reading LLM stream: {}", e);
+                break;
+            }
+        };
+        
+        // Convert bytes to string, handling potential UTF-8 issues
+        let text = String::from_utf8_lossy(&chunk);
+        sse_buffer.push_str(&text);
+        
+        // Process complete lines from SSE buffer
+        while let Some(newline_pos) = sse_buffer.find('\n') {
+            let line = sse_buffer[..newline_pos].to_string();
+            sse_buffer = sse_buffer[newline_pos + 1..].to_string();
+            
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    // Send any remaining tokens
+                    if !token_buffer.is_empty() {
+                        let sanitized = sanitize_for_tts(&strip_reasoning_tags(&token_buffer));
+                        if !sanitized.is_empty() {
+                            let msg = json!({"type": "text", "text": sanitized});
+                            tts_ws.send(Message::Text(msg.to_string())).await?;
+                        }
+                    }
+                    break;
+                }
+                
+                if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = json_data
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
+                        // Record first token time
+                        if first_token_time.is_none() {
+                            first_token_time = Some(std::time::Instant::now());
+                            info!("First LLM token received!");
+                        }
+                        
+                        token_buffer.push_str(content);
+                        full_response.push_str(content);
+                        
+                        // AGGRESSIVE: Send to TTS on small chunks for sub-500ms latency
+                        let should_send = token_buffer.len() >= 5
+                            || content.ends_with('.')
+                            || content.ends_with('!')
+                            || content.ends_with('?')
+                            || content.ends_with(',')
+                            || content.ends_with(' ');
+                        
+                        if should_send && !token_buffer.is_empty() {
+                            let sanitized = sanitize_for_tts(&strip_reasoning_tags(&token_buffer));
+                            if !sanitized.is_empty() {
+                                let msg = json!({"type": "text", "text": sanitized});
+                                tts_ws.send(Message::Text(msg.to_string())).await?;
+                            }
+                            token_buffer.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // STEP 3: Send END signal to TTS
+    tts_ws.send(Message::Text(json!({"type": "end"}).to_string())).await?;
+    
+    // STEP 4: Receive audio chunks and forward immediately
+    let mut total_bytes = 0;
+    let mut chunk_count = 0;
+    let mut first_audio_time: Option<std::time::Instant> = None;
+    
+    while let Some(msg_result) = tts_ws.next().await {
+        match msg_result? {
+            Message::Binary(data) => {
+                if first_audio_time.is_none() {
+                    first_audio_time = Some(std::time::Instant::now());
+                    if let Some(ttft) = first_token_time {
+                        info!("First audio received! Latency from first token: {:?}", first_audio_time.unwrap().duration_since(ttft));
+                    }
+                }
+                
+                total_bytes += data.len();
+                chunk_count += 1;
+                
+                if let Some(tx) = &egress_tx {
+                    if tx.send(Bytes::from(data)).await.is_err() {
+                        info!("Egress channel closed");
+                        break;
+                    }
+                }
+            }
+            Message::Text(text) => {
+                let status: serde_json::Value = serde_json::from_str(&text)?;
+                if status.get("status").and_then(|s| s.as_str()) == Some("complete") {
+                    info!("TTS streaming complete: {} chunks, {} bytes", chunk_count, total_bytes);
+                    break;
+                } else if status.get("error").is_some() {
+                    anyhow::bail!("TTS error: {}", text);
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    
+    // Add assistant response to conversation
+    let cleaned_response = strip_reasoning_tags(&full_response);
+    if !cleaned_response.is_empty() {
+        conversation.write().await.push(json!({
+            "role": "assistant",
+            "content": cleaned_response
+        }));
+    }
+    
+    *state.write().await = CallState::Listening;
+    Ok(())
+}
+
+/// Optimized LLM -> TTS with sentence-level streaming for low latency
+/// 
+/// This buffers sentences and sends them to TTS immediately for <1s latency
+#[instrument(skip(config, http_client, conversation, state, cancel_token, egress_tx))]
+pub async fn process_llm_tts(
+    config: &AgentConfig,
+    http_client: &Client,
+    conversation: &Arc<RwLock<Vec<serde_json::Value>>>,
+    state: &Arc<RwLock<CallState>>,
+    cancel_token: &Arc<Mutex<CancellationToken>>,
+    egress_tx: Option<&mpsc::Sender<Bytes>>,
+) -> anyhow::Result<()> {
+    *state.write().await = CallState::Thinking;
+    
+    // Updated system prompt with backchanneling and natural fillers
+    let messages = {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "You are Phil having a natural phone conversation. Use occasional filler words like 'um', 'ahh', 'hmm' and backchanneling ('I see', 'right', 'got it') for natural speech. Keep responses SHORT (1-2 sentences). Respond immediately without thinking."}),
+            // Few-shot examples
+            json!({"role": "user", "content": "Hey, are you there?"}),
+            json!({"role": "assistant", "content": "Yeah, I'm here! What's up?"}),
+            json!({"role": "user", "content": "What's the weather like?"}),
+            json!({"role": "assistant", "content": "Hmm, not sure! Hope it's sunny though."}),
+        ];
+        msgs.extend(conversation.read().await.clone());
+        msgs
+    };
+    
+    // Optimized LLM request for speed
+    let llm_request = json!({
+        "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
+        "messages": messages,
+        "stream": true,
+        "max_tokens": 80,  // Shorter for speed
+        "temperature": 0.8, // Natural variation
+        "top_p": 0.95,
+        "presence_penalty": 0.1,
+        "frequency_penalty": 0.1,
+        "bad_words": ["<think>", "</think>", "The user said", "I need to respond"]
+    });
+    
+    info!("Calling Nemotron LLM (optimized)...");
+    let response = http_client
+        .post(&config.llm_url)
+        .json(&llm_request)
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        anyhow::bail!("LLM request failed: {}", error_text);
+    }
+    
+    *state.write().await = CallState::Speaking;
+    
+    // Stream response and send sentences to TTS immediately
     let mut sentence_buffer = String::new();
+    let mut full_response = String::new();
     let mut stream = response.bytes_stream();
     
     while let Some(chunk) = stream.next().await {
@@ -405,16 +643,18 @@ pub async fn process_llm_tts(
         let chunk = chunk?;
         let text = String::from_utf8_lossy(&chunk);
         
-        // Parse SSE format (data: {...})
+        // Parse SSE
         for line in text.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
-                    // Flush any remaining text
+                    // Flush remaining via WebSocket
                     let cleaned = strip_reasoning_tags(&sentence_buffer);
                     let tts_ready = sanitize_for_tts(&cleaned);
-                    if !tts_ready.is_empty() && tts_ready.len() >= 5 {
-                        info!("TTS final chunk ({} chars): {}", tts_ready.len(), tts_ready);
-                        generate_tts(&tts_ready, config, http_client, egress_tx).await?;
+                    if !tts_ready.is_empty() && tts_ready.len() >= 3 {
+                        info!("TTS WebSocket final: {}", tts_ready);
+                        if let Err(e) = generate_tts_websocket(&tts_ready, config, egress_tx).await {
+                            error!("WebSocket TTS final failed: {}", e);
+                        }
                     }
                     break;
                 }
@@ -428,24 +668,26 @@ pub async fn process_llm_tts(
                         .and_then(|c| c.as_str())
                     {
                         sentence_buffer.push_str(content);
+                        full_response.push_str(content);
                         
-                        // Check for sentence end - stream immediately for low latency
-                        if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') || content.ends_with('\n') {
+                        // Send on sentence end OR every 15 chars for faster response
+                        if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') 
+                           || (sentence_buffer.len() >= 15 && content.ends_with(' ')) {
                             let cleaned = strip_reasoning_tags(&sentence_buffer);
                             let tts_ready = sanitize_for_tts(&cleaned);
                             
-                            if !tts_ready.is_empty() && tts_ready.len() >= 5 {
-                                info!("Streaming TTS sentence ({} chars): {}", tts_ready.len(), tts_ready);
+                            if !tts_ready.is_empty() && tts_ready.len() >= 3 {
+                                info!("TTS WebSocket stream: {}", tts_ready);
                                 
-                                // Spawn TTS in parallel - don't wait for it to complete
+                                // Spawn WebSocket TTS in parallel for lower latency
                                 let tts_text = tts_ready.to_string();
                                 let tts_config = config.clone();
-                                let tts_http = http_client.clone();
                                 let tts_egress = egress_tx.map(|tx| tx.clone());
                                 
                                 tokio::spawn(async move {
-                                    if let Err(e) = generate_tts(&tts_text, &tts_config, &tts_http, tts_egress.as_ref()).await {
-                                        error!("TTS generation failed: {}", e);
+                                    // Use WebSocket TTS for sub-500ms latency
+                                    if let Err(e) = generate_tts_websocket(&tts_text, &tts_config, tts_egress.as_ref()).await {
+                                        error!("WebSocket TTS failed: {}", e);
                                     }
                                 });
                             }
@@ -456,6 +698,15 @@ pub async fn process_llm_tts(
                 }
             }
         }
+    }
+    
+    // Add to conversation
+    let cleaned = strip_reasoning_tags(&full_response);
+    if !cleaned.is_empty() {
+        conversation.write().await.push(json!({
+            "role": "assistant",
+            "content": cleaned
+        }));
     }
     
     *state.write().await = CallState::Listening;
@@ -527,7 +778,99 @@ fn sanitize_for_tts(input: &str) -> String {
         .to_string()
 }
 
-/// Generate TTS audio from text
+/// Generate TTS audio from text using WebSocket streaming for low latency
+/// 
+/// This function connects to MOSS-TTS via WebSocket and streams text tokens
+/// as they arrive, enabling <500ms latency by overlapping LLM generation with TTS synthesis.
+#[instrument(skip(text, config, egress_tx))]
+pub async fn generate_tts_websocket(
+    text: &str,
+    config: &AgentConfig,
+    egress_tx: Option<&mpsc::Sender<Bytes>>,
+) -> anyhow::Result<()> {
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message;
+    
+    let tts_ws_url = config.tts_url.replace("http://", "ws://").replace("https://", "wss://").replace("/v1/audio/speech", "/ws/tts");
+    
+    info!("Connecting to TTS WebSocket at {}", tts_ws_url);
+    
+    let (mut ws_stream, _) = connect_async(&tts_ws_url).await?;
+    
+    // Send init message
+    let init_msg = json!({
+        "type": "init",
+        "voice": config.voice.as_deref().unwrap_or("default")
+    });
+    ws_stream.send(Message::Text(init_msg.to_string())).await?;
+    
+    // Wait for ready response
+    let ready_msg = ws_stream.next().await.ok_or_else(|| anyhow::anyhow!("TTS WebSocket closed before ready"))??;
+    if let Message::Text(text) = ready_msg {
+        let status: serde_json::Value = serde_json::from_str(&text)?;
+        if status.get("status").and_then(|s| s.as_str()) != Some("ready") {
+            anyhow::bail!("TTS WebSocket did not become ready: {}", text);
+        }
+    }
+    
+    info!("TTS WebSocket ready, streaming text: '{}'", text);
+    
+    // Stream text to TTS (can be sent character by character for true streaming)
+    // For efficiency, we send in small chunks
+    let chars: Vec<char> = text.chars().collect();
+    let chunk_size = 3; // Send ~3 chars at a time
+    
+    for chunk in chars.chunks(chunk_size) {
+        let text_chunk: String = chunk.iter().collect();
+        let msg = json!({
+            "type": "text",
+            "text": text_chunk
+        });
+        ws_stream.send(Message::Text(msg.to_string())).await?;
+    }
+    
+    // Send end message
+    let end_msg = json!({"type": "end"});
+    ws_stream.send(Message::Text(end_msg.to_string())).await?;
+    
+    // Receive audio chunks
+    let mut total_bytes = 0;
+    let mut chunk_count = 0;
+    let mut complete = false;
+    
+    while let Some(msg) = ws_stream.next().await {
+        match msg? {
+            Message::Binary(data) => {
+                total_bytes += data.len();
+                chunk_count += 1;
+                
+                if let Some(tx) = &egress_tx {
+                    if tx.send(Bytes::from(data)).await.is_err() {
+                        info!("Egress channel closed during TTS");
+                        break;
+                    }
+                }
+            }
+            Message::Text(text) => {
+                let status: serde_json::Value = serde_json::from_str(&text)?;
+                if status.get("status").and_then(|s| s.as_str()) == Some("complete") {
+                    complete = true;
+                    break;
+                } else if status.get("error").is_some() {
+                    anyhow::bail!("TTS error: {}", text);
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    
+    info!("TTS WebSocket complete: {} chunks, {} bytes, complete={}", chunk_count, total_bytes, complete);
+    
+    Ok(())
+}
+
+/// Generate TTS audio from text using HTTP (fallback for non-streaming)
 #[instrument(skip(text, config, http_client, egress_tx))]
 pub async fn generate_tts(
     text: &str,
@@ -545,7 +888,6 @@ pub async fn generate_tts(
     });
     
     // Add zero-shot voice cloning if reference audio provided
-    // CRITICAL: reference_text must be provided and should match the content of the reference audio
     if let Some(ref_audio) = &config.voice {
         if ref_audio.starts_with("data:audio") || ref_audio.len() > 100 {
             tts_request["extra_body"] = json!({
@@ -579,9 +921,6 @@ pub async fn generate_tts(
         total_bytes += chunk_len;
         chunk_count += 1;
         
-        info!("TTS chunk {}: {} bytes", chunk_count, chunk_len);
-        
-        // Send to egress channel if provided
         if let Some(tx) = egress_tx {
             if tx.send(chunk).await.is_err() {
                 info!("Egress channel closed, sent {} chunks ({} bytes)", chunk_count, total_bytes);
@@ -590,7 +929,7 @@ pub async fn generate_tts(
         }
     }
     
-    info!("TTS streaming complete: {} chunks, {} bytes total for text: '{}'", chunk_count, total_bytes, text);
+    info!("TTS streaming complete: {} chunks, {} bytes total", chunk_count, total_bytes);
     
     Ok(())
 }

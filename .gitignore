@@ -124,3 +124,4 @@ orchestrator/models/*.onnx
 
 # Voice reference audio (WAV files generated from MP3)
 tts/*.wav
+livekit_orchestrator/target/

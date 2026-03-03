@@ -1,12 +1,12 @@
+# LiveKit configuration
 port: 7880
-bind: 0.0.0.0
+
 rtc:
   port_range_start: 50000
   port_range_end: 51000
   udp_port: 7882
-  use_external_ip: false
-  ips:
-    - 127.0.0.1
+  tcp_port: 7881
+  use_external_ip: true
 
 redis:
   address: localhost:6379
@@ -26,8 +26,7 @@ room:
 
 turn:
   enabled: true
-  domain: localhost
-  tls_port: 5349
+  domain: cleans2s.voiceflow.cloud
   udp_port: 3478
   relay_range_start: 30000
   relay_range_end: 31000

@@ -1,0 +1,46 @@
+[package]
+name = "livekit-s2s-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# LiveKit Rust SDK
+livekit = "0.7"
+livekit-protocol = "0.7"
+
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+
+# WebSocket for TTS/LLM communication
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+futures = "0.3"
+
+# HTTP client for services
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Audio processing
+cpal = "0.15"
+rubato = "0.14"
+bytes = "1.5"
+
+# Utilities
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+uuid = { version = "1.7", features = ["v4"] }
+once_cell = "1.19"
+
+# ONNX Runtime for VAD (optional - can use Silero directly)
+# ort = { version = "2.0.0-rc.2", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

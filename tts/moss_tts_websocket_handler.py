@@ -43,11 +43,11 @@ async def handle_websocket_tts(websocket: WebSocket, model_components):
             return
         
         # Import from main server
-        from moss_tts_fastapi_server import tensor_to_pcm_bytes, CODEC_SAMPLE_RATE, CACHED_VOICE_PROMPT_TOKENS
+        from moss_tts_fastapi_server import tensor_to_pcm_bytes, CODEC_SAMPLE_RATE
         
-        # Use CACHED voice embedding for instant voice cloning (~600ms saved!)
-        # If no cached embedding, fall back to default voice
-        prompt_tokens = CACHED_VOICE_PROMPT_TOKENS
+        # Use CACHED voice embedding from model_components (~600ms saved!)
+        # Passed directly from server to avoid import issues
+        prompt_tokens = model_components.get('cached_voice_tokens')
         
         if prompt_tokens is not None:
             print(f"DEBUG: WebSocket using CACHED voice embedding (fast!)", flush=True)

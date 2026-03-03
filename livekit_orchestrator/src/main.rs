@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base64;
 use futures::{SinkExt, StreamExt};
 use libwebrtc::audio_stream::native::NativeAudioStream;
 use libwebrtc::audio_source::{native::NativeAudioSource, RtcAudioSource};
@@ -111,7 +112,9 @@ impl S2SAgent {
         let mut processor = AudioProcessor::new(16000);
         let mut speech_buffer: Vec<f32> = Vec::new();
         let mut silence_frames: u32 = 0;
+        let mut speech_frames: u32 = 0;
         const SILENCE_THRESHOLD: u32 = 12; // ~375ms at 30ms frames
+        const BARGE_IN_SPEECH_FRAMES: u32 = 8; // ~240ms of continuous speech before barge-in
 
         info!("Processing audio track...");
 
@@ -123,11 +126,13 @@ impl S2SAgent {
             match processor.process_chunk(&samples) {
                 VadResult::Speech(audio) => {
                     silence_frames = 0;
+                    speech_frames += 1;
                     speech_buffer.extend(audio);
 
                     // BARGE-IN: User started speaking while AI is talking
+                    // Require multiple consecutive speech frames to avoid false triggers
                     let token = cancel_token.lock().await;
-                    if !token.is_cancelled() {
+                    if !token.is_cancelled() && speech_frames >= BARGE_IN_SPEECH_FRAMES {
                         info!("Barge-in detected! Cancelling AI response");
                         token.cancel();
                         // Clear audio buffer
@@ -137,6 +142,7 @@ impl S2SAgent {
                 }
                 VadResult::Silence => {
                     silence_frames += 1;
+                    speech_frames = 0;
 
                     // End of speech detected
                     if silence_frames > SILENCE_THRESHOLD && !speech_buffer.is_empty() {
@@ -164,7 +170,7 @@ impl S2SAgent {
                         silence_frames = 0;
                     }
                 }
-                VadResult::None => {}
+                _ => {}
             }
         }
 
@@ -188,15 +194,63 @@ impl S2SAgent {
         // 2. LLM: Stream tokens
         let llm_stream = self.stream_llm(&transcript).await?;
 
-        // 3. TTS: Persistent WebSocket connection
+        // 3. TTS: Persistent WebSocket connection with TRUE TOKEN-LEVEL STREAMING
         self.process_tts_stream(llm_stream, audio_source, cancel_token)
             .await
     }
 
-    /// Transcribe audio using Voxtral-Mini-4B-Realtime via vLLM
-    /// Sends multipart form data to vLLM's OpenAI-compatible endpoint
+    /// Transcribe audio using Voxtral-Mini-4B-Realtime via WebSocket Realtime API
+    /// Streams audio chunks and receives transcription tokens in real-time
     async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
-        // Convert f32 to i16 PCM bytes for Voxtral
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        use base64::Engine;
+        
+        // Connect to Voxtral Realtime WebSocket endpoint
+        let ws_url = self.asr_url.replace("http://", "ws://").replace("https://", "wss://");
+        let realtime_url = format!("{}/v1/realtime", ws_url);
+        
+        info!("Connecting to Voxtral Realtime API at {}", realtime_url);
+        
+        let (mut ws_stream, _) = connect_async(&realtime_url)
+            .await
+            .context("Failed to connect to Voxtral Realtime API")?;
+        
+        // Wait for session.created
+        let session_id = match ws_stream.next().await {
+            Some(Ok(WsMessage::Text(text))) => {
+                let msg: serde_json::Value = serde_json::from_str(&text)?;
+                if msg.get("type").and_then(|t| t.as_str()) == Some("session.created") {
+                    let id = msg.get("id").and_then(|i| i.as_str()).unwrap_or("unknown").to_string();
+                    info!("Voxtral session created: {}", id);
+                    id
+                } else {
+                    return Err(anyhow::anyhow!("Expected session.created, got: {}", text));
+                }
+            }
+            Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error: {}", e)),
+            _ => return Err(anyhow::anyhow!("Unexpected WebSocket response")),
+        };
+        
+        // CRITICAL: Voxtral Realtime API requires model at TOP LEVEL, not in session
+        // The session.turn_detection must be null for manual commit mode
+        let session_update = json!({
+            "type": "session.update",
+            "model": "/home/phil/telephony-stack/models/asr/voxtral-mini-4b-realtime",
+            "session": {
+                "modalities": ["text"],
+                "input_audio_format": "pcm16",
+                "turn_detection": null
+            }
+        });
+        
+        ws_stream.send(WsMessage::Text(session_update.to_string())).await?;
+        info!("Sent session.update with model");
+        
+        // vLLM Realtime API does NOT send back session.updated - validation is internal
+        // Just proceed immediately to sending audio after a small delay
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        
+        // Convert f32 audio to PCM16 bytes
         let pcm_bytes: Vec<u8> = audio_data
             .iter()
             .flat_map(|&s| {
@@ -204,50 +258,110 @@ impl S2SAgent {
                 sample.to_le_bytes()
             })
             .collect();
-
-        // Create multipart form with audio as "in-memory file"
-        // This avoids disk I/O and keeps everything in RAM
-        let audio_part = reqwest::multipart::Part::bytes(pcm_bytes)
-            .file_name("audio.pcm")
-            .mime_str("audio/pcm")?;
-
-        let form = reqwest::multipart::Form::new()
-            .part("file", audio_part)
-            .text("model", "mistralai/Voxtral-Mini-4B-Realtime-2602");
-
-        // Send to Voxtral vLLM endpoint
-        let response = self
-            .http_client
-            .post(format!("{}/v1/audio/transcriptions", self.asr_url))
-            .multipart(form)
-            .send()
-            .await
-            .context("Voxtral ASR request failed")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Voxtral ASR error {}: {}", status, text));
-        }
-
-        let result: serde_json::Value = response.json().await?;
-        let transcript = result
-            .get("text")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
         
-        info!("Voxtral transcript: '{}'", transcript);
+        // Send audio in chunks (80ms = 1280 samples at 16kHz = 2560 bytes)
+        const CHUNK_SAMPLES: usize = 1280;
+        const CHUNK_BYTES: usize = CHUNK_SAMPLES * 2; // 16-bit = 2 bytes per sample
+        
+        info!("Streaming {} bytes of audio to Voxtral", pcm_bytes.len());
+        
+        for chunk in pcm_bytes.chunks(CHUNK_BYTES) {
+            let audio_msg = json!({
+                "type": "input_audio_buffer.append",
+                "audio": base64::engine::general_purpose::STANDARD.encode(chunk)
+            });
+            ws_stream.send(WsMessage::Text(audio_msg.to_string())).await?;
+        }
+        
+        // Signal end of audio input - this triggers transcription automatically
+        // Use final: false to start generation (final: true just stops without generating)
+        let commit_msg = json!({
+            "type": "input_audio_buffer.commit",
+            "final": false
+        });
+        ws_stream.send(WsMessage::Text(commit_msg.to_string())).await?;
+        info!("Sent input_audio_buffer.commit (triggering transcription)");
+        
+        // Collect transcription
+        let mut transcript_parts: Vec<String> = Vec::new();
+        let timeout = tokio::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + timeout;
+        
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            
+            match tokio::time::timeout(remaining, ws_stream.next()).await {
+                Ok(Some(Ok(WsMessage::Text(text)))) => {
+                    let msg: serde_json::Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    
+                    let msg_type = msg.get("type").and_then(|t| t.as_str());
+                    
+                    // Debug: log all event types
+                    info!("Voxtral event: {:?}", msg_type);
+                    
+                    match msg_type {
+                        Some("transcription.delta") => {
+                            if let Some(delta) = msg.get("delta").and_then(|d| d.as_str()) {
+                                if !delta.is_empty() {
+                                    transcript_parts.push(delta.to_string());
+                                    info!("Transcription delta: '{}'", delta);
+                                } else {
+                                    info!("Empty delta received");
+                                }
+                            }
+                        }
+                        Some("transcription.done") => {
+                            let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            info!("Transcription done: '{}'", text);
+                            break;
+                        }
+                        Some("error") => {
+                            error!("Voxtral error: {:?}", msg);
+                            break;
+                        }
+                        _ => {
+                            // Log other events for debugging
+                            if let Some(t) = msg_type {
+                                info!("Other Voxtral event: {} - {:?}", t, msg);
+                            }
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => {
+                    // Ignore other WebSocket message types
+                    continue;
+                }
+                Ok(Some(Err(e))) => {
+                    error!("WebSocket error: {}", e);
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    info!("Voxtral transcription timeout");
+                    break;
+                }
+            }
+        }
+        
+        // Close WebSocket gracefully
+        let _ = ws_stream.close(None).await;
+        
+        let transcript = transcript_parts.join("").trim().to_string();
+        info!("Final Voxtral transcript (session: {}): '{}'", session_id, transcript);
+        
         Ok(transcript)
     }
 
     /// Stream LLM tokens from Nemotron
     async fn stream_llm(&self, transcript: &str) -> Result<mpsc::Receiver<String>> {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(256); // Larger buffer for streaming
 
         let url = format!("{}/v1/chat/completions", self.llm_url);
         let body = json!({
-            "model": "/model",
+            "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
             "messages": [
                 {"role": "system", "content": "/no_think\nYou are a helpful voice assistant. Speak naturally with occasional verbal fillers like 'um', 'ahh', 'hmm'. Use backchanneling like 'I see', 'right', 'got it'. Be conversational and warm."},
                 {"role": "user", "content": transcript}
@@ -257,11 +371,15 @@ impl S2SAgent {
             "max_tokens": 150
         });
 
+        info!("LLM: Sending request for transcript: '{}'", transcript);
         let client = self.http_client.clone();
 
         tokio::spawn(async move {
             let response = match client.post(&url).json(&body).send().await {
-                Ok(r) => r,
+                Ok(r) => {
+                    info!("LLM: Got response, status: {}", r.status());
+                    r
+                }
                 Err(e) => {
                     error!("LLM request failed: {}", e);
                     return;
@@ -297,6 +415,7 @@ impl S2SAgent {
                                         .and_then(|d| d.get("content"))
                                         .and_then(|c| c.as_str())
                                     {
+                                        info!("LLM token: '{}'", content);
                                         if tx.send(content.to_string()).await.is_err() {
                                             break;
                                         }
@@ -316,7 +435,8 @@ impl S2SAgent {
         Ok(rx)
     }
 
-    /// Stream TTS audio to LiveKit with persistent WebSocket
+    /// Stream TTS audio to LiveKit with TRUE TOKEN-LEVEL STREAMING
+    /// Sends each LLM token to TTS immediately for <500ms E2E latency
     async fn process_tts_stream(
         &self,
         mut llm_rx: mpsc::Receiver<String>,
@@ -327,40 +447,74 @@ impl S2SAgent {
         let tts_ws_url = format!("{}/ws/tts", self.tts_url);
         let (mut tts_ws, _) = connect_async(&tts_ws_url).await?;
 
-        info!("Connected to TTS WebSocket");
+        info!("TTS: Connected to WebSocket for token-level streaming");
 
-        // Send voice configuration
-        let config = json!({
-            "voice_id": "phil-conversational",
-            "speed": 1.0,
-            "temperature": 0.7
+        // Send init message for streaming protocol
+        let init_msg = json!({
+            "type": "init",
+            "voice": "phil"
         });
-        tts_ws.send(Message::Text(config.to_string())).await?;
+        tts_ws.send(Message::Text(init_msg.to_string())).await?;
+        info!("TTS: Sent init message");
 
-        let mut sentence_buffer = String::new();
-        const MIN_SENTENCE_LEN: usize = 15;
+        // "Comma-Level Chunking" with "Trailing Buffer" - Industry Standard S2S
+        // 25-character sliding window with punctuation triggers for optimal
+        // balance between latency (<500ms) and prosody (natural intonation)
+        let mut token_buffer = String::new();
+        const FLUSH_SIZE: usize = 25;  // "Golden Ratio" - enough for prosody, small enough for speed
+        const FLUSH_TRIGGERS: &[char] = &[',', '.', '!', '?', ';', ':'];  // Punctuation triggers
+        const FLUSH_TIMEOUT_MS: u64 = 50;  // Flush after N milliseconds if no punctuation
+
+        // Create interval for periodic flushing
+        let mut flush_interval = tokio::time::interval(
+            tokio::time::Duration::from_millis(FLUSH_TIMEOUT_MS)
+        );
+        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 // Check for cancellation (barge-in)
                 _ = cancel_token.cancelled() => {
-                    info!("Turn cancelled by barge-in");
+                    info!("TTS: Turn cancelled by barge-in");
                     break;
                 }
 
-                // Receive LLM tokens
+                // Receive LLM tokens - "Comma-Level Chunking" for optimal prosody
                 Some(token) = llm_rx.recv() => {
-                    sentence_buffer.push_str(&token);
+                    info!("TTS: Received token: '{}'", token);
+                    
+                    // Check if token contains punctuation trigger
+                    let should_flush = token.ends_with(FLUSH_TRIGGERS) ||
+                                      FLUSH_TRIGGERS.iter().any(|&p| token.contains(p));
+                    
+                    token_buffer.push_str(&token);
 
-                    // Check for sentence end
-                    if sentence_buffer.len() > MIN_SENTENCE_LEN &&
-                       (token.ends_with('.') || token.ends_with('!') ||
-                        token.ends_with('?') || token.ends_with(',')) {
+                    // Flush on: (1) Punctuation, (2) Buffer size threshold, or (3) Timeout
+                    if should_flush || token_buffer.len() >= FLUSH_SIZE {
+                        let text = std::mem::take(&mut token_buffer);
+                        let token_msg = json!({
+                            "type": "token",
+                            "text": text
+                        });
+                        info!("TTS: Streaming chunk ({} chars): '{}'", text.len(), text);
+                        if let Err(e) = tts_ws.send(Message::Text(token_msg.to_string())).await {
+                            error!("TTS: Send error: {}", e);
+                            break;
+                        }
+                    }
+                }
 
-                        // Send to TTS
-                        let text = std::mem::take(&mut sentence_buffer);
-                        if let Err(e) = tts_ws.send(Message::Text(text)).await {
-                            error!("TTS send error: {}", e);
+                // Periodic flush for low-latency with small token accumulation
+                _ = flush_interval.tick() => {
+                    if !token_buffer.is_empty() {
+                        let text = std::mem::take(&mut token_buffer);
+                        let token_msg = json!({
+                            "type": "token",
+                            "text": text
+                        });
+                        info!("TTS: Periodic flush: '{}'", text);
+                        if let Err(e) = tts_ws.send(Message::Text(token_msg.to_string())).await {
+                            error!("TTS: Send error: {}", e);
                             break;
                         }
                     }
@@ -384,33 +538,91 @@ impl S2SAgent {
                             };
 
                             if let Err(e) = audio_source.capture_frame(&frame).await {
-                                error!("Audio capture error: {}", e);
+                                error!("TTS: Audio capture error: {}", e);
                             }
                         }
-                        Ok(Message::Text(text)) if text == "[DONE]" => {
+                        Ok(Message::Text(text)) => {
+                            // Check for completion signal (JSON format)
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if json.get("type").and_then(|t| t.as_str()) == Some("complete") {
+                                    info!("TTS: Received completion signal");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(Message::Close(_)) => {
+                            info!("TTS: WebSocket closed by server");
                             break;
                         }
                         Err(e) => {
-                            error!("TTS WebSocket error: {}", e);
+                            error!("TTS: WebSocket error: {}", e);
                             break;
                         }
                         _ => {}
                     }
                 }
 
-                // All senders dropped
-                else => break,
+                // All senders dropped - LLM stream ended
+                else => {
+                    info!("TTS: LLM stream ended");
+                    break;
+                }
             }
         }
 
-        // Flush any remaining text
-        if !sentence_buffer.is_empty() {
-            let _ = tts_ws.send(Message::Text(sentence_buffer)).await;
+        // Send any remaining buffered tokens
+        if !token_buffer.is_empty() {
+            let final_msg = json!({
+                "type": "token",
+                "text": token_buffer
+            });
+            let _ = tts_ws.send(Message::Text(final_msg.to_string())).await;
+        }
+
+        // Send end signal to TTS
+        let end_msg = json!({"type": "end"});
+        let _ = tts_ws.send(Message::Text(end_msg.to_string())).await;
+        info!("TTS: Sent end signal");
+
+        // Wait a bit for final audio to come back
+        let timeout = tokio::time::Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, tts_ws.next()).await {
+                Ok(Some(Ok(Message::Binary(audio)))) => {
+                    let samples: Vec<i16> = audio
+                        .chunks_exact(2)
+                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                        .collect();
+                    let samples_per_channel = samples.len() as u32;
+                    let frame = AudioFrame {
+                        data: samples.into(),
+                        sample_rate: 24000,
+                        num_channels: 1,
+                        samples_per_channel,
+                    };
+                    let _ = audio_source.capture_frame(&frame).await;
+                }
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if json.get("type").and_then(|t| t.as_str()) == Some("complete") {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
         }
 
         // Close WebSocket gracefully
         let _ = tts_ws.close(None).await;
-        info!("TTS stream ended");
+        info!("TTS: Stream ended");
 
         Ok(())
     }
@@ -441,7 +653,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "ws://localhost:7880".to_string());
     let room_name = std::env::var("ROOM_NAME").unwrap_or_else(|_| "dgx-spark-room".to_string());
 
-    info!("Starting LiveKit S2S Orchestrator");
+    info!("Starting LiveKit S2S Orchestrator (Token-Level Streaming)");
     info!("Connecting to LiveKit at: {}", ws_url);
     info!("Joining room: {}", room_name);
 

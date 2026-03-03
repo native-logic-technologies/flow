@@ -11,7 +11,7 @@ use tracing::debug;
 pub const VAD_SAMPLE_RATE: usize = 8000;
 pub const VAD_CHUNK_SAMPLES: usize = 256; // 32ms at 8kHz
 pub const VAD_THRESHOLD: f32 = 0.5;
-pub const SILENCE_TIMEOUT_MS: u64 = 600; // Commit after 600ms silence
+pub const SILENCE_TIMEOUT_MS: u64 = 250; // Aggressive: 250ms silence for fast response
 
 /// Silero VAD session state
 pub struct SileroVad {
