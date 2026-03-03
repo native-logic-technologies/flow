@@ -52,6 +52,7 @@ def health():
 
 
 @app.route('/voice', methods=['POST'])
+@app.route('/twilio-voice', methods=['POST'])
 def incoming_call():
     """
     Handle incoming Twilio voice call

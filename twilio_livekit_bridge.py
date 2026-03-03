@@ -264,7 +264,7 @@ async def main():
     # Start WebSocket server for Twilio Media Streams
     async with websockets.serve(handle_twilio_stream, "0.0.0.0", 5001):
         logger.info("WebSocket server started on port 5001")
-        logger.info("Twilio webhook URL: https://twilio-bridge.voiceflow.cloud/voice")
+        logger.info("Twilio webhook URL: https://cleans2s.voiceflow.cloud/twilio-voice")
         logger.info("WebSocket URL: wss://cleans2s.voiceflow.cloud/twilio-stream")
         
         # Keep running
