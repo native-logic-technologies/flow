@@ -165,36 +165,27 @@
             statusEl.className = 'status ' + type;
         }
 
-        function generateToken(participantName) {
-            // Demo token generation - in production, use server-side
-            const apiKey = "APIQp4vjmCjrWQ9";
-            const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-            const now = Math.floor(Date.now() / 1000);
-            const payload = btoa(JSON.stringify({
-                exp: now + 3600,
-                iss: apiKey,
-                sub: participantName,
-                video: {
-                    roomJoin: true,
-                    room: "dgx-spark-room",
-                    canPublish: true,
-                    canSubscribe: true,
-                    canPublishData: true
-                }
-            }));
-            return `${header}.${payload}.demo`;
+        async function fetchToken() {
+            const participantName = "user-" + Math.floor(Math.random() * 10000);
+            const response = await fetch(`https://cleans2s.voiceflow.cloud/token?participant=${participantName}`);
+            if (!response.ok) {
+                throw new Error(`Token fetch failed: ${response.status}`);
+            }
+            const data = await response.json();
+            return data.token;
         }
 
         async function connect() {
             const url = "wss://cleans2s.voiceflow.cloud";
-            const participantName = "user-" + Math.floor(Math.random() * 10000);
-            const token = generateToken(participantName);
             
-            log("Connecting to " + url + "...");
-            updateStatus("<p>Connecting...</p>", "");
+            log("Fetching token...");
+            updateStatus("<p>Authenticating...</p>");
             connectBtn.disabled = true;
             
             try {
+                const token = await fetchToken();
+                log("Token received, connecting...");
+                
                 room = new LivekitClient.Room({
                     adaptiveStream: true,
                     dynacast: true,
@@ -257,7 +248,7 @@
                 
             } catch (err) {
                 log("Connection failed: " + err.message, "error");
-                updateStatus("<p>Connection failed. Check console.</p>", "error");
+                updateStatus("<p>Connection failed: " + err.message + "</p>", "error");
                 connectBtn.disabled = false;
                 console.error(err);
             }
@@ -273,7 +264,7 @@
 
         // Initial log
         log("Ready to connect to cleans2s.voiceflow.cloud");
-        log("Configuration: Comma-Level Chunking (25 chars)");
+        log("Click Connect to start");
     </script>
 </body>
 </html>
