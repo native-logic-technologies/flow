@@ -14,10 +14,12 @@ Environment="TRITON_PTXAS_PATH=/usr/local/cuda-13.0/bin/ptxas"
 Environment="HF_HOME=/tmp/hf_cache"
 Environment="CUDA_HOME=/usr/local/cuda-13.0"
 Environment="PYTHONUNBUFFERED=1"
+Environment="VLLM_ATTENTION_BACKEND=FLASHINFER"
 
 ExecStart=/home/phil/telephony-stack-env/bin/python -m vllm.entrypoints.openai.api_server \
     --model /home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4 \
     --quantization modelopt_fp4 \
+    --kv-cache-dtype fp8 \
     --gpu-memory-utilization 0.2 \
     --max-model-len 32768 \
     --enforce-eager \
