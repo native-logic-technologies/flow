@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanS2S Voice AI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #333;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 600px;
+            width: 90%;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            background: #f0f0f0;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        
+        .tab.active {
+            background: #667eea;
+            color: white;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        
+        .status.disconnected {
+            background: #fee;
+            color: #c33;
+        }
+        
+        .status.connecting {
+            background: #ffeaa7;
+            color: #d63031;
+        }
+        
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status.speaking {
+            background: #e3f2fd;
+            color: #1565c0;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        
+        button {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 50px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: #c0392b;
+        }
+        
+        .text-input-area {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .text-input-area input {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 50px;
+            font-size: 16px;
+            outline: none;
+        }
+        
+        .text-input-area input:focus {
+            border-color: #667eea;
+        }
+        
+        .text-input-area button {
+            padding: 15px 25px;
+            white-space: nowrap;
+        }
+        
+        .visualizer {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 60px;
+            margin-bottom: 20px;
+            gap: 3px;
+        }
+        
+        .bar {
+            width: 4px;
+            background: #667eea;
+            border-radius: 2px;
+            transition: height 0.1s;
+        }
+        
+        .transcript {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .transcript h3 {
+            margin-bottom: 15px;
+            color: #555;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 10px;
+            animation: fadeIn 0.3s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            background: #667eea;
+            color: white;
+            margin-left: 20%;
+        }
+        
+        .message.bot {
+            background: #e9ecef;
+            color: #333;
+            margin-right: 20%;
+        }
+        
+        .message .label {
+            font-size: 11px;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+        
+        .info {
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
+        }
+        
+        .latency {
+            display: inline-block;
+            background: #f0f0f0;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        
+        .mode-indicator {
+            text-align: center;
+            padding: 8px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .debug-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ CleanS2S Voice AI</h1>
+        <p class="subtitle">Real-time speech-to-speech on DGX Spark</p>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('voice')">🎤 Voice</button>
+            <button class="tab" onclick="switchTab('text')">⌨️ Text</button>
+        </div>
+        
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <!-- Latency Stats Panel -->
+        <div class="latency-stats" id="latencyStats" style="background: #f0f0f0; border-radius: 8px; padding: 10px; margin-bottom: 15px; font-size: 12px; font-family: monospace;">
+            <div style="font-weight: bold; margin-bottom: 5px;">📊 Latency Stats</div>
+            <div id="ttftStat">TTFT: --</div>
+            <div id="ttsStat">TTS: --</div>
+            <div id="totalStat">Total E2E: --</div>
+            <div id="bufferStat">Buffer: --</div>
+        </div>
+        
+        <!-- Voice Mode -->
+        <div id="voice-tab" class="tab-content active">
+            <div class="mode-indicator">Speak naturally, pause when done</div>
+            
+            <div class="visualizer" id="visualizer">
+                <!-- Audio visualizer bars -->
+            </div>
+            
+            <div class="controls">
+                <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
+                <button id="disconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+        </div>
+        
+        <!-- Text Mode -->
+        <div id="text-tab" class="tab-content">
+            <div class="mode-indicator">Type your message, AI responds in voice</div>
+            
+            <div class="text-input-area">
+                <input type="text" id="textInput" placeholder="Type your message..." 
+                       onkeypress="if(event.key==='Enter')sendText()">
+                <button class="btn-primary" onclick="sendText()">Send</button>
+            </div>
+            
+            <div class="controls">
+                <button id="textConnectBtn" class="btn-primary" onclick="connectText()">Connect</button>
+                <button id="textDisconnectBtn" class="btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+        </div>
+        
+        <div class="transcript">
+            <h3>Conversation</h3>
+            <div id="messages"></div>
+        </div>
+        
+        <div class="info">
+            <div>WebSocket: <code>wss://cleans2s.voiceflow.cloud/ws</code></div>
+            <div class="latency" id="latency">Click Connect to start</div>
+            <div style="margin-top: 10px;">
+                <button class="btn-primary" onclick="testAudio()" style="font-size: 12px; padding: 5px 10px;">Test Audio</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const WS_URL = 'wss://cleans2s.voiceflow.cloud/ws';
+        const AUDIO_CONTEXT_SAMPLE_RATE = 8000;
+        const OUTPUT_SAMPLE_RATE = 24000;
+        
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let isConnected = false;
+        
+        // Latency tracking
+        let messageStartTime = 0;
+        let firstTokenTime = 0;
+        let firstAudioTime = 0;
+        let latencyStats = {
+            ttft: [],
+            tts: [],
+            total: []
+        };
+        
+        // Audio scheduling for gapless playback
+        let nextPlayTime = 0;
+        let currentMode = 'voice';
+        
+        // Visualizer setup
+        const visualizer = document.getElementById('visualizer');
+        const bars = [];
+        for (let i = 0; i < 30; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'bar';
+            bar.style.height = '5px';
+            visualizer.appendChild(bar);
+            bars.push(bar);
+        }
+        
+        function switchTab(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(mode + '-tab').classList.add('active');
+        }
+        
+        function updateStatus(status, text) {
+            const el = document.getElementById('status');
+            el.className = 'status ' + status;
+            el.textContent = text;
+        }
+        
+        function addMessage(role, text) {
+            const messages = document.getElementById('messages');
+            const msg = document.createElement('div');
+            msg.className = 'message ' + role;
+            msg.innerHTML = `<div class="label">${role === 'user' ? 'You' : 'AI'}</div>${text}`;
+            messages.appendChild(msg);
+            messages.scrollTop = messages.scrollHeight;
+        }
+        
+        // Text mode connection
+        async function connectText() {
+            updateStatus('connecting', 'Connecting...');
+            document.getElementById('textConnectBtn').disabled = true;
+            
+            try {
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                
+                ws.onopen = async () => {
+                    isConnected = true;
+                    updateStatus('connected', 'Connected - Type a message!');
+                    
+                    // Start live latency updater
+                    setInterval(() => {
+                        if (messageStartTime && !firstAudioTime) {
+                            // Still waiting for response
+                            updateLatencyStats();
+                        }
+                    }, 100);
+                    document.getElementById('textDisconnectBtn').disabled = false;
+                    document.getElementById('textInput').focus();
+                    
+                    // Initialize audio context for text mode too
+                    if (!audioContext) {
+                        audioContext = new AudioContext({
+                            sampleRate: OUTPUT_SAMPLE_RATE
+                        });
+                    }
+                    
+                    // CRITICAL: Resume audio context (browsers block autoplay)
+                    if (audioContext.state === 'suspended') {
+                        console.log('Resuming audio context...');
+                        await audioContext.resume();
+                        console.log('Audio context resumed, state:', audioContext.state);
+                    }
+                    
+                    // Reset audio scheduler for new conversation
+                    nextPlayTime = 0;
+                    console.log('🔄 Audio scheduler reset');
+                    
+                    // Send a test ping
+                    ws.send(JSON.stringify({type: "ping"}));
+                };
+                
+                ws.onmessage = async (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        // Received audio - play it
+                        console.log('Received audio:', event.data.byteLength, 'bytes');
+                        await playAudio(event.data);
+                    } else {
+                        console.log('Server:', event.data);
+                    }
+                };
+                
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    updateStatus('disconnected', 'Connection error');
+                    disconnect();
+                };
+                
+                ws.onclose = () => {
+                    if (isConnected) disconnect();
+                };
+                
+            } catch (err) {
+                console.error('Connection failed:', err);
+                updateStatus('disconnected', 'Failed: ' + err.message);
+                document.getElementById('textConnectBtn').disabled = false;
+            }
+        }
+        
+        // Send text message
+        async function sendText() {
+            if (!isConnected || !ws) {
+                alert('Please connect first!');
+                return;
+            }
+            
+            const input = document.getElementById('textInput');
+            const text = input.value.trim();
+            
+            if (!text) return;
+            
+            // Start latency tracking
+            messageStartTime = performance.now();
+            firstTokenTime = 0;
+            firstAudioTime = 0;
+            updateLatencyStats();
+            
+            // Add to conversation
+            addMessage('user', text);
+            input.value = '';
+            
+            updateStatus('thinking', 'AI is thinking...');
+            
+            // Send as a special text message
+            // The orchestrator needs to handle this
+            ws.send(JSON.stringify({
+                type: 'text',
+                text: text
+            }));
+        }
+        
+        // Voice mode connection
+        async function connect() {
+            updateStatus('connecting', 'Connecting...');
+            document.getElementById('connectBtn').disabled = true;
+            
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: AUDIO_CONTEXT_SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                
+                // CRITICAL: Create AudioContext at OUTPUT rate (24kHz), not input rate
+                // The browser will resample microphone input automatically
+                audioContext = new AudioContext({
+                    sampleRate: OUTPUT_SAMPLE_RATE
+                });
+                
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                
+                ws.onopen = async () => {
+                    isConnected = true;
+                    updateStatus('connected', 'Connected - Speak now!');
+                    document.getElementById('disconnectBtn').disabled = false;
+                    
+                    // CRITICAL: Resume audio context (browsers block autoplay)
+                    if (audioContext.state === 'suspended') {
+                        console.log('Resuming audio context...');
+                        await audioContext.resume();
+                        console.log('Audio context resumed, state:', audioContext.state);
+                    }
+                    
+                    // Reset audio scheduler for new conversation
+                    nextPlayTime = 0;
+                    console.log('🔄 Audio scheduler reset');
+                    
+                    startAudioProcessing();
+                };
+                
+                ws.onmessage = async (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        console.log('Received audio:', event.data.byteLength, 'bytes');
+                        await playAudio(event.data);
+                    } else {
+                        console.log('Server:', event.data);
+                    }
+                };
+                
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    updateStatus('disconnected', 'Connection error');
+                    disconnect();
+                };
+                
+                ws.onclose = () => {
+                    if (isConnected) disconnect();
+                };
+                
+            } catch (err) {
+                console.error('Connection failed:', err);
+                updateStatus('disconnected', 'Failed: ' + err.message);
+                document.getElementById('connectBtn').disabled = false;
+            }
+        }
+        
+        function startAudioProcessing() {
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            processor = audioContext.createScriptProcessor(256, 1, 1);
+            
+            // Resampling buffer: accumulate 24kHz samples, output 8kHz
+            // Ratio: 24000 / 8000 = 3:1 (take every 3rd sample)
+            let resampleBuffer = [];
+            const RESAMPLE_RATIO = OUTPUT_SAMPLE_RATE / 8000; // 3.0
+            
+            processor.onaudioprocess = (e) => {
+                if (!isConnected) return;
+                
+                const inputData = e.inputBuffer.getChannelData(0);
+                
+                // Visualize
+                const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
+                const avg = sum / inputData.length;
+                const height = Math.max(5, Math.min(50, avg * 200));
+                bars.forEach((bar, i) => {
+                    setTimeout(() => {
+                        bar.style.height = height + 'px';
+                    }, i * 20);
+                });
+                
+                // Resample from 24kHz to 8kHz (take every 3rd sample)
+                for (let i = 0; i < inputData.length; i += RESAMPLE_RATIO) {
+                    resampleBuffer.push(inputData[Math.floor(i)]);
+                }
+                
+                // Send when we have enough samples (256 @ 8kHz = 32ms)
+                while (resampleBuffer.length >= 256) {
+                    const chunk = resampleBuffer.splice(0, 256);
+                    
+                    // Convert Float32 to Int16 PCM
+                    const int16Data = new Int16Array(256);
+                    for (let i = 0; i < 256; i++) {
+                        int16Data[i] = Math.max(-32768, Math.min(32767, chunk[i] * 32768));
+                    }
+                    
+                    // Send to server
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(int16Data.buffer);
+                    }
+                }
+            };
+            
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+        
+        // Test audio playback
+        async function testAudio() {
+            console.log('Testing audio playback...');
+            
+            // Create audio context if needed
+            if (!audioContext) {
+                audioContext = new AudioContext({
+                    sampleRate: OUTPUT_SAMPLE_RATE
+                });
+            }
+            
+            // Resume if suspended
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            
+            console.log('AudioContext state:', audioContext.state);
+            
+            // Generate a simple test tone (1kHz sine wave for 0.5s)
+            const duration = 0.5;
+            const sampleRate = OUTPUT_SAMPLE_RATE;
+            const numSamples = duration * sampleRate;
+            const buffer = audioContext.createBuffer(1, numSamples, sampleRate);
+            const data = buffer.getChannelData(0);
+            
+            for (let i = 0; i < numSamples; i++) {
+                data[i] = Math.sin(2 * Math.PI * 1000 * i / sampleRate) * 0.3;
+            }
+            
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start();
+            
+            console.log('Test tone playing...');
+            updateStatus('speaking', 'Playing test tone...');
+            
+            source.onended = () => {
+                updateStatus('connected', 'Audio test complete');
+            };
+        }
+        
+        async function playAudio(arrayBuffer) {
+            console.log('🔊 playAudio called with', arrayBuffer.byteLength, 'bytes');
+            
+            // Ensure audio context exists
+            if (!audioContext) {
+                console.log('Creating new AudioContext');
+                audioContext = new AudioContext({
+                    sampleRate: OUTPUT_SAMPLE_RATE
+                });
+            }
+            
+            // Resume audio context if suspended (browser requirement)
+            if (audioContext.state === 'suspended') {
+                console.log('Resuming suspended audio context');
+                await audioContext.resume();
+            }
+            
+            console.log('AudioContext state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+            
+            try {
+                // Verify we have data
+                if (arrayBuffer.byteLength === 0) {
+                    console.error('❌ Empty audio buffer');
+                    return;
+                }
+                
+                // CRITICAL FIX: Ensure even byte length for Int16Array
+                // Network fragmentation can cause odd byte counts
+                const validByteLength = arrayBuffer.byteLength - (arrayBuffer.byteLength % 2);
+                if (validByteLength !== arrayBuffer.byteLength) {
+                    console.warn(`⚠️ Odd byte length ${arrayBuffer.byteLength}, trimming to ${validByteLength}`);
+                }
+                const safeBuffer = arrayBuffer.slice(0, validByteLength);
+                
+                // Convert Int16 PCM to Float32
+                const int16Data = new Int16Array(safeBuffer);
+                
+                // Calculate max amplitude
+                let maxAmp = 0;
+                for (let i = 0; i < int16Data.length; i++) {
+                    const abs = Math.abs(int16Data[i]);
+                    if (abs > maxAmp) maxAmp = abs;
+                }
+                
+                const duration = int16Data.length / OUTPUT_SAMPLE_RATE;
+                console.log(`📊 Chunk: ${int16Data.length} samples, ${duration.toFixed(3)}s, maxAmp: ${maxAmp}`);
+                
+                // Convert to Float32
+                const float32Data = new Float32Array(int16Data.length);
+                for (let i = 0; i < int16Data.length; i++) {
+                    float32Data[i] = int16Data[i] / 32768.0;
+                }
+                
+                // CRITICAL: Schedule audio chunks back-to-back using AudioContext clock
+                // If the queue is empty/finished, reset to "now"
+                if (nextPlayTime < audioContext.currentTime) {
+                    nextPlayTime = audioContext.currentTime;
+                    console.log('🔄 Reset schedule to now:', nextPlayTime.toFixed(3));
+                }
+                
+                // CRITICAL FIX: Limit buffer size to prevent drift
+                // Check BEFORE scheduling this chunk
+                const MAX_BUFFER_AHEAD = 2.0; // seconds - allow slightly more for TTS generation time
+                const bufferBefore = nextPlayTime - audioContext.currentTime;
+                
+                if (bufferBefore > MAX_BUFFER_AHEAD) {
+                    console.warn(`⚠️ Buffer too large (${bufferBefore.toFixed(2)}s), dropping chunk to limit latency`);
+                    // Skip this chunk - don't schedule it
+                    return;
+                }
+                
+
+                
+                // Create audio buffer
+                const audioBuffer = audioContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
+                audioBuffer.getChannelData(0).set(float32Data);
+                
+                // Schedule this chunk to play exactly when the last one finishes
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(nextPlayTime);
+                
+                console.log(`▶️  Scheduled at ${nextPlayTime.toFixed(3)}s (current: ${audioContext.currentTime.toFixed(3)}s)`);
+                updateStatus('speaking', 'AI is speaking...');
+                
+                // Advance the clock for the NEXT incoming chunk
+                nextPlayTime += audioBuffer.duration;
+                
+                source.onended = () => {
+                    // Only reset status when we're actually done (allow buffer time)
+                    if (audioContext.currentTime >= nextPlayTime - 0.1) {
+                        console.log('⏹️  Audio finished playing');
+                        if (isConnected) {
+                            updateStatus('connected', currentMode === 'voice' ? 'Connected - Speak now!' : 'Connected - Type a message!');
+                        }
+                    }
+                };
+            } catch (err) {
+                console.error('❌ Error playing audio:', err);
+            }
+        }
+        
+        function updateLatencyStats() {
+            const now = performance.now();
+            
+            // Calculate averages from last 5 samples
+            const avg = (arr) => arr.length > 0 ? (arr.slice(-5).reduce((a,b) => a+b, 0) / Math.min(arr.length, 5)).toFixed(0) : '--';
+            
+            const ttft = firstTokenTime && messageStartTime ? (firstTokenTime - messageStartTime).toFixed(0) + 'ms' : '--';
+            const tts = firstAudioTime && messageStartTime ? (firstAudioTime - messageStartTime).toFixed(0) + 'ms' : '--';
+            
+            // Buffer calculation - ensure non-negative
+            let buffer = '--';
+            if (nextPlayTime && audioContext && audioContext.state === 'running') {
+                const bufferSecs = nextPlayTime - audioContext.currentTime;
+                buffer = Math.max(0, bufferSecs).toFixed(2) + 's';
+            }
+            
+            document.getElementById('ttftStat').textContent = `TTFT: ${ttft}`;
+            document.getElementById('ttsStat').textContent = `TTS: ${tts}`;
+            document.getElementById('bufferStat').textContent = `Buffer: ${buffer}`;
+            
+            // Show total latency (pending or completed)
+            if (messageStartTime) {
+                const endTime = firstAudioTime || performance.now();
+                const total = (endTime - messageStartTime).toFixed(0);
+                const label = firstAudioTime ? 'Total E2E' : 'Waiting';
+                document.getElementById('totalStat').textContent = `${label}: ${total}ms`;
+            }
+        }
+        
+        function disconnect() {
+            isConnected = false;
+            
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            updateStatus('disconnected', 'Disconnected');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            document.getElementById('textConnectBtn').disabled = false;
+            document.getElementById('textDisconnectBtn').disabled = true;
+            bars.forEach(bar => bar.style.height = '5px');
+        }
+    </script>
+</body>
+</html>
