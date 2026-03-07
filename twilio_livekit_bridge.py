@@ -231,7 +231,7 @@ def incoming_call():
 <Response>
     <Say voice="Polly.Joanna">Connecting you to DGX Spark Voice AI.</Say>
     <Connect>
-        <Stream url="wss://cleans2s.voiceflow.cloud/twilio-stream" track="both_tracks" />
+        <Stream url="wss://cleans2s.voiceflow.cloud/bridge/stream" track="both_tracks" />
     </Connect>
 </Response>"""
     
