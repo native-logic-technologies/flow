@@ -289,29 +289,23 @@ class TwilioDreamStackOrchestrator:
     ) -> Tuple[List[EmotionalSentence], float]:
         """Generate emotional response from Nemotron"""
         
-        system_prompt = """You are a friendly AI assistant having a natural phone conversation.
-
-IMPORTANT: Start your response with [EMOTION: X] where X is one of: NEUTRAL, HAPPY, EXCITED, CALM, EMPATHETIC, SERIOUS, THINKING
-
-For multiple sentences with different emotions, use [EMOTION: X] before each sentence.
-
-Keep responses brief (1-2 sentences) for natural conversation flow.
-
-Examples:
-[EMOTION: EXCITED] That's amazing news! I'm so happy for you!
-[EMOTION: EMPATHETIC] I'm sorry to hear that. [EMOTION: CALM] Let's work through this together."""
+        # Nemotron thinking control: use chat_template_kwargs to disable thinking
+        system_prompt = "You are a friendly AI voice assistant having a natural phone conversation. Keep responses brief (1-2 sentences). Start with [EMOTION: X] where X is: NEUTRAL, HAPPY, EXCITED, CALM, EMPATHETIC, SERIOUS, or THINKING."
 
         start_time = time.time()
         
         payload = {
-            "model": "/home/phil/telephony-stack/models/llm/nemotron-3-nano-30b-nvfp4",
+            "model": "models/llm/nemotron-3-nano-30b-nvfp4",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text}
             ],
             "max_tokens": 80,
             "temperature": 0.7,
-            "stream": False
+            "stream": False,
+            "chat_template_kwargs": {
+                "enable_thinking": False
+            }
         }
         
         try:
@@ -580,8 +574,8 @@ async def inbound(CallSid: str = Form(...), From: str = Form(...)):
     logger.info(f"📞 Incoming call from {From}")
     orchestrator.create_session(CallSid)
     
-    # Get public URL from environment or use default
-    public_url = os.environ.get("PUBLIC_URL", "wss://localhost:8080")
+    # Get public URL from environment or use Cloudflare default
+    public_url = os.environ.get("PUBLIC_URL", "wss://cleans2s.voiceflow.cloud")
     
     # Return TwiML to connect to WebSocket stream
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
