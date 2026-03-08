@@ -124,8 +124,15 @@ class EmotionalProsodyParser:
         if not text or not text.strip():
             return []
         
-        pattern = r'\[EMOTION:\s*(\w+)\]\s*([^\[]+?)(?=\[EMOTION:|$)'
+        # Handle both [EMOTION: X] and [X] formats
+        # Try [EMOTION: X] format first
+        pattern = r'\[EMOTION:\s*(\w+)\]\s*([^\[]+?)(?=\[EMOTION:|\[\w+\]:?$|$)'
         matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+        
+        # If no matches, try [X] format (e.g., [NEUTRAL] text)
+        if not matches:
+            pattern = r'\[(\w+)\]\s*([^.!?]*[.!?])'
+            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
         
         sentences = []
         for i, (emotion, text_part) in enumerate(matches):
